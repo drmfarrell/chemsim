@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ChemSim: Interactive Molecular Simulator</title>
+  <link rel="manifest" href="/manifest.json" />
+  <meta name="theme-color" content="#508cff" />
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; font-family: system-ui, -apple-system, sans-serif; }
+    #app { width: 100%; height: 100%; position: relative; }
+    #canvas-container { width: 100%; height: 100%; }
+    canvas { display: block; }
+
+    /* UI overlay */
+    #ui-overlay {
+      position: absolute;
+      top: 0;
+      left: 0;
+      pointer-events: none;
+      width: 100%;
+      height: 100%;
+      z-index: 10;
+    }
+    #ui-overlay > * { pointer-events: auto; }
+
+    /* Control panel */
+    #control-panel {
+      position: absolute;
+      top: 16px;
+      left: 16px;
+      background: rgba(20, 20, 30, 0.85);
+      backdrop-filter: blur(8px);
+      border-radius: 12px;
+      padding: 16px;
+      color: #e0e0e0;
+      font-size: 14px;
+      min-width: 240px;
+      box-shadow: 0 4px 24px rgba(0,0,0,0.3);
+    }
+    #control-panel h2 {
+      font-size: 16px;
+      margin-bottom: 12px;
+      color: #fff;
+    }
+    .control-group {
+      margin-bottom: 12px;
+    }
+    .control-group label {
+      display: block;
+      margin-bottom: 4px;
+      font-size: 12px;
+      color: #aaa;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .control-group select,
+    .control-group input[type="range"] {
+      width: 100%;
+    }
+    select {
+      background: rgba(255,255,255,0.1);
+      color: #fff;
+      border: 1px solid rgba(255,255,255,0.2);
+      border-radius: 6px;
+      padding: 6px 8px;
+      font-size: 14px;
+    }
+    button {
+      background: rgba(80, 140, 255, 0.3);
+      color: #fff;
+      border: 1px solid rgba(80, 140, 255, 0.5);
+      border-radius: 6px;
+      padding: 8px 12px;
+      cursor: pointer;
+      font-size: 13px;
+      width: 100%;
+      margin-top: 4px;
+      transition: background 0.2s;
+    }
+    button:hover { background: rgba(80, 140, 255, 0.5); }
+
+    /* Energy display */
+    #energy-display {
+      position: absolute;
+      top: 16px;
+      right: 16px;
+      background: rgba(20, 20, 30, 0.85);
+      backdrop-filter: blur(8px);
+      border-radius: 12px;
+      padding: 16px;
+      color: #e0e0e0;
+      font-size: 14px;
+      min-width: 200px;
+      box-shadow: 0 4px 24px rgba(0,0,0,0.3);
+    }
+    #energy-display h3 {
+      font-size: 14px;
+      margin-bottom: 8px;
+      color: #fff;
+    }
+    .energy-value {
+      font-family: 'Courier New', monospace;
+      font-size: 18px;
+      font-weight: bold;
+      margin: 4px 0;
+    }
+    .energy-value.attractive { color: #4caf50; }
+    .energy-value.repulsive { color: #f44336; }
+    .energy-value.neutral { color: #fff; }
+    .energy-label {
+      font-size: 11px;
+      color: #888;
+    }
+
+    /* Simulation stats panel (Mode 2) */
+    #sim-stats {
+      position: absolute;
+      top: 16px;
+      right: 16px;
+      background: rgba(20, 20, 30, 0.85);
+      backdrop-filter: blur(8px);
+      border-radius: 12px;
+      padding: 16px;
+      color: #e0e0e0;
+      font-size: 14px;
+      min-width: 200px;
+      box-shadow: 0 4px 24px rgba(0,0,0,0.3);
+    }
+    #sim-stats h3 {
+      font-size: 14px;
+      margin-bottom: 8px;
+      color: #fff;
+    }
+
+    /* FPS counter */
+    #fps-counter {
+      position: absolute;
+      bottom: 16px;
+      right: 16px;
+      background: rgba(0,0,0,0.5);
+      color: #0f0;
+      font-family: monospace;
+      font-size: 12px;
+      padding: 4px 8px;
+      border-radius: 4px;
+    }
+
+    /* View toggles */
+    .toggle-row {
+      display: flex;
+      gap: 4px;
+      flex-wrap: wrap;
+    }
+    .toggle-btn {
+      flex: 1;
+      min-width: 60px;
+      font-size: 11px;
+      padding: 5px 4px;
+    }
+    .toggle-btn.active {
+      background: rgba(80, 140, 255, 0.6);
+      border-color: rgba(80, 140, 255, 0.8);
+    }
+
+    /* VR button */
+    #vr-button {
+      position: absolute;
+      bottom: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(80, 140, 255, 0.5);
+      padding: 12px 24px;
+      font-size: 16px;
+      border-radius: 8px;
+      display: none;
+    }
+
+    /* Loading overlay */
+    #loading-overlay {
+      position: absolute;
+      top: 0; left: 0;
+      width: 100%; height: 100%;
+      background: #0a0a14;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      color: #fff;
+      z-index: 100;
+      transition: opacity 0.5s;
+    }
+    #loading-overlay.hidden {
+      opacity: 0;
+      pointer-events: none;
+    }
+    .loading-spinner {
+      width: 48px;
+      height: 48px;
+      border: 3px solid rgba(255,255,255,0.1);
+      border-top-color: #508cff;
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+      margin-bottom: 16px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <div id="canvas-container" role="application" aria-label="Molecular simulation 3D viewport"></div>
+
+    <div id="ui-overlay">
+      <div id="control-panel">
+        <h2>ChemSim</h2>
+
+        <div class="control-group">
+          <label>Mode</label>
+          <select id="mode-selector">
+            <option value="mode1" selected>Two-Molecule Interaction</option>
+            <option value="mode2">Many-Molecule Box</option>
+          </select>
+        </div>
+
+        <div class="control-group" id="molecule-a-group">
+          <label>Molecule A</label>
+          <select id="molecule-a-selector"></select>
+        </div>
+
+        <div class="control-group" id="molecule-b-group">
+          <label>Molecule B</label>
+          <select id="molecule-b-selector"></select>
+        </div>
+
+        <div class="control-group" id="molecule-count-group" style="display:none;">
+          <label>Molecule Count: <span id="molecule-count-value">50</span></label>
+          <input type="range" id="molecule-count-slider" min="10" max="200" value="50" step="10" />
+        </div>
+
+        <div class="control-group" id="temp-group" style="display:none;">
+          <label>Temperature: <span id="temp-value">300</span> K</label>
+          <input type="range" id="temp-slider" min="50" max="1000" value="300" step="10" />
+        </div>
+
+        <div class="control-group">
+          <label>View</label>
+          <div class="toggle-row">
+            <button class="toggle-btn active" id="view-ball-stick">Ball+Stick</button>
+            <button class="toggle-btn" id="view-space-fill">Space Fill</button>
+            <button class="toggle-btn" id="view-cloud-only">Cloud Only</button>
+          </div>
+        </div>
+
+        <div class="control-group">
+          <label>Options</label>
+          <div class="toggle-row">
+            <button class="toggle-btn active" id="toggle-cloud">Cloud</button>
+            <button class="toggle-btn" id="toggle-forces">Forces</button>
+          </div>
+        </div>
+
+        <div class="control-group">
+          <label>Experiments</label>
+          <select id="experiment-selector">
+            <option value="">Choose an experiment...</option>
+          </select>
+        </div>
+
+        <button id="snap-optimal" title="Find lowest energy orientation">Snap to Optimal</button>
+        <button id="start-tutorial" style="margin-top: 4px;">Tutorial</button>
+
+        <div class="control-group" id="mode2-controls" style="display:none;">
+          <label>Simulation</label>
+          <div class="toggle-row">
+            <button class="toggle-btn active" id="toggle-sim-play">Play</button>
+            <button class="toggle-btn" id="toggle-network">Network</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Mode 2 stats panel -->
+      <div id="sim-stats" style="display:none;">
+        <h3>Simulation Stats</h3>
+        <div>
+          <span class="energy-label">Temperature: </span>
+          <span id="sim-temperature">--</span>
+        </div>
+        <div>
+          <span class="energy-label">Potential Energy: </span>
+          <span id="sim-pe">--</span>
+        </div>
+        <div>
+          <span class="energy-label">Kinetic Energy: </span>
+          <span id="sim-ke">--</span>
+        </div>
+        <div>
+          <span class="energy-label">Avg NN Distance: </span>
+          <span id="sim-nn-dist">--</span>
+        </div>
+        <div>
+          <span class="energy-label">Step: </span>
+          <span id="sim-step">0</span>
+        </div>
+      </div>
+
+      <div id="energy-display">
+        <h3>Interaction Energy</h3>
+        <div class="energy-value neutral" id="energy-total">0.00 kJ/mol</div>
+        <div class="energy-label">Total Energy</div>
+        <div style="margin-top: 8px;">
+          <span class="energy-label">Distance: </span>
+          <span id="distance-value">--</span>
+        </div>
+        <div>
+          <span class="energy-label">Coulomb: </span>
+          <span id="coulomb-value">--</span>
+        </div>
+        <div>
+          <span class="energy-label">LJ: </span>
+          <span id="lj-value">--</span>
+        </div>
+      </div>
+
+      <div id="fps-counter">-- FPS</div>
+
+      <!-- Experiment prompt -->
+      <div id="experiment-prompt" style="display:none; position:absolute; bottom:60px; left:50%; transform:translateX(-50%); max-width:500px; width:90%; background:rgba(20,25,45,0.9); backdrop-filter:blur(8px); border-radius:12px; padding:16px 20px; color:#e0e0e0; font-size:13px; line-height:1.5; box-shadow:0 4px 24px rgba(0,0,0,0.4); border:1px solid rgba(80,140,255,0.2);">
+        <div style="display:flex; justify-content:space-between; align-items:start;">
+          <p id="experiment-prompt-text" style="margin:0; flex:1;"></p>
+          <button id="close-experiment-prompt" style="background:none; border:none; color:#888; cursor:pointer; font-size:18px; padding:0 0 0 12px; min-width:auto; width:auto;">&times;</button>
+        </div>
+      </div>
+
+      <button id="vr-button">Enter VR</button>
+    </div>
+
+    <div id="loading-overlay">
+      <div class="loading-spinner"></div>
+      <div>Loading ChemSim...</div>
+    </div>
+  </div>
+
+  <script type="module" src="/src/main.ts"></script>
+  <script>
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('/sw.js').catch(() => {});
+      });
+    }
+  </script>
+</body>
+</html>

@@ -1,0 +1,45 @@
+{
+  "name": "chemsim",
+  "version": "1.0.0",
+  "description": "Interactive molecular interaction simulator for chemistry education",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build:wasm": "cd src/physics && wasm-pack build --target web --out-dir ../../src/wasm-pkg",
+    "build": "npm run build:wasm && vite build",
+    "preview": "vite preview",
+    "test:unit": "vitest run",
+    "test:unit:watch": "vitest",
+    "test:e2e": "playwright test",
+    "test": "npm run test:unit && npm run test:e2e"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/drmfarrell/molsim.git"
+  },
+  "keywords": [
+    "chemistry",
+    "molecular",
+    "simulation",
+    "education",
+    "WebXR",
+    "WASM"
+  ],
+  "author": "Dr. Fountain Farrell",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/drmfarrell/molsim/issues"
+  },
+  "homepage": "https://github.com/drmfarrell/molsim#readme",
+  "dependencies": {
+    "three": "^0.183.2"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.59.1",
+    "@types/three": "^0.183.1",
+    "typescript": "^6.0.2",
+    "vite": "^8.0.8",
+    "vite-plugin-wasm": "^3.6.0",
+    "vitest": "^4.1.4"
+  }
+}
