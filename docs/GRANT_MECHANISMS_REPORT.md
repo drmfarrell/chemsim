@@ -225,6 +225,24 @@ The following paragraph can be adapted for letters of intent across multiple mec
 
 ---
 
+## Intellectual Merit: Physics Engine and Validation
+
+This section provides ready-to-adapt language for the Intellectual Merit sections of NSF proposals and equivalent sections of private-foundation LOIs. It addresses reviewers who will ask whether ChemSim's underlying science is rigorous.
+
+### Physics engine design
+
+ChemSim's physics core is a purpose-built implementation of classical electrostatics (Coulomb) and van der Waals (Lennard-Jones) interactions with rigid-body molecular dynamics, written in Rust and compiled to WebAssembly. A purpose-built engine was chosen over forking an existing molecular-dynamics package (e.g., Lumol, OpenMM, LAMMPS) for three reasons: (1) the novel electron-cloud deformation algorithm, ChemSim's key pedagogical innovation, is tightly coupled to our per-vertex electrostatic-field evaluation and would require reimplementation on top of any third-party engine regardless; (2) keeping the WebAssembly bundle small (~125 KB compressed) is essential for the tool's accessibility on low-bandwidth campus networks and mobile devices; and (3) the limited scope of the required physics (classical pairwise forces with rigid molecules, no angles, dihedrals, Ewald summation, or constraint algorithms needed for intermolecular-force pedagogy) is a poor match for production MD engines that carry substantial complexity irrelevant to our use case.
+
+### Validation methodology
+
+The engine has been validated against an independent Python implementation of the same classical Coulomb and Lennard-Jones formulas and against quantum-chemistry reference calculations using the PySCF package at the HF/6-31G* level. Twelve implementation-fidelity benchmarks compare our Rust physics output to NumPy-based reference calculations for identical geometries; all twelve agree to machine precision (0.00 percent relative difference) on quantities including the water monomer dipole moment, water dimer interaction energy, methane-methane and water-methane pair energies, Lennard-Jones potential minima, and electrostatic potential at probe points around a water molecule. Mode 2 simulations at 300 K reproduce the qualitative phase distinction between water (potential energy of -10.7 kJ/mol per molecule, mean nearest-neighbor distance 3.4 Angstroms, liquid-like) and methane (potential energy near zero, mean nearest-neighbor distance 5.0 Angstroms, gas-like), and raising water's temperature to 800 K reduces its cohesion as expected. Disagreements with higher-level quantum chemistry (e.g., the TIP3P dipole moment overshoots the experimental value by 20 percent) are documented as well-understood limitations of the classical point-charge model, not as implementation defects. The validation effort surfaced and corrected a unit-conversion bug in the Coulomb constant that had caused electrostatic energies to be scaled by a factor of 4.184 (kcal/mol vs kJ/mol); this correction was invisible in qualitative testing because internal comparisons remained self-consistent, and was caught only by the cross-tool comparison. Detailed validation results are preserved in docs/SCIENCE_VALIDATION.md and the test harness is included in the public repository as an ongoing regression check.
+
+### Future validation work (proposed)
+
+The current validation effort establishes implementation correctness and qualitative phase-behavior fidelity sufficient for pedagogical use at the undergraduate level. A Phase 2 validation program proposed for year 1 of funded development would add independent cross-checks against production MD packages (LAMMPS and OpenMM) on a shared test suite of water-water, methanol-methanol, and ammonia-water dimer energies, as well as radial distribution functions for liquid water at 298 K. This three-way cross-validation (ChemSim, LAMMPS, OpenMM) strengthens both the scientific defensibility of the tool and its suitability for reuse by other chemistry educators building curriculum materials on top of it. Additional validation targets for year 2 include free-energy perturbation calculations of small-molecule solvation, a Nose-Hoover thermostat for canonical sampling, and expansion of the molecule library to cover biomolecular functional groups used in biochemistry courses.
+
+---
+
 ## Budget Guidance
 
 ### Typical Budget Ranges for Educational Software Development Grants

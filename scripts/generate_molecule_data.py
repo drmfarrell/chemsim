@@ -21,7 +21,7 @@ import os
 # Constants
 # ---------------------------------------------------------------------------
 VDW = {"H": 1.20, "C": 1.70, "N": 1.55, "O": 1.52, "F": 1.47, "S": 1.80, "Cl": 1.75}
-KE = 332.0637  # Coulomb constant in kJ/mol * Angstrom / e^2
+KE = 1389.35  # Coulomb constant in kJ/mol * Angstrom / e^2 (1389.35 = 332.0637 kcal/mol * 4.184 kJ/kcal)
 
 OUTPUT_DIR = "/home/science2246/chemsim/src/data/molecules"
 

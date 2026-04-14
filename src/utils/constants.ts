@@ -1,5 +1,5 @@
 // Physical constants
-export const COULOMB_CONSTANT = 332.0637; // kJ/mol * Angstrom / e^2 (for charges in electron units, distances in Angstroms)
+export const COULOMB_CONSTANT = 1389.35; // kJ/mol * Angstrom / e^2 (for charges in electron units, distances in Angstroms). 1389.35 = 332.0637 kcal/mol * 4.184 kJ/kcal.
 export const BOLTZMANN_KJ = 0.00831446; // kJ/(mol*K)
 export const AVOGADRO = 6.02214076e23;
 

@@ -1,9 +1,11 @@
 use crate::Atom;
 
-/// Coulomb constant: 332.0637 kJ*Angstrom/(mol*e^2)
+/// Coulomb constant: 1389.35 kJ*Angstrom/(mol*e^2)
 /// For charges in electron units and distances in Angstroms,
-/// energy comes out in kJ/mol
-pub const COULOMB_K: f64 = 332.0637;
+/// energy comes out in kJ/mol.
+/// NOTE: 332.0637 is the value in kcal*Angstrom/(mol*e^2); converting to kJ
+/// gives 332.0637 * 4.184 = 1389.35.
+pub const COULOMB_K: f64 = 1389.35;
 
 /// Compute the Coulomb potential energy between two atoms
 /// E = k * q1 * q2 / r
