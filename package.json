@@ -15,7 +15,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/drmfarrell/molsim.git"
+    "url": "git+https://github.com/drmfarrell/chemsim.git"
   },
   "keywords": [
     "chemistry",
@@ -28,9 +28,9 @@
   "author": "Dr. Fountain Farrell",
   "license": "MIT",
   "bugs": {
-    "url": "https://github.com/drmfarrell/molsim/issues"
+    "url": "https://github.com/drmfarrell/chemsim/issues"
   },
-  "homepage": "https://github.com/drmfarrell/molsim#readme",
+  "homepage": "https://github.com/drmfarrell/chemsim#readme",
   "dependencies": {
     "three": "^0.183.2"
   },
