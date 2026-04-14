@@ -35,12 +35,12 @@
       border-radius: 12px;
       padding: 16px;
       color: #e0e0e0;
-      font-size: 14px;
+      font-size: 18px;
       min-width: 240px;
       box-shadow: 0 4px 24px rgba(0,0,0,0.3);
     }
     #control-panel h2 {
-      font-size: 16px;
+      font-size: 20px;
       margin-bottom: 12px;
       color: #fff;
     }
@@ -50,7 +50,7 @@
     .control-group label {
       display: block;
       margin-bottom: 4px;
-      font-size: 12px;
+      font-size: 15px;
       color: #aaa;
       text-transform: uppercase;
       letter-spacing: 0.5px;
@@ -65,7 +65,11 @@
       border: 1px solid rgba(255,255,255,0.2);
       border-radius: 6px;
       padding: 6px 8px;
-      font-size: 14px;
+      font-size: 18px;
+    }
+    select option {
+      background: #1a1a2e;
+      color: #fff;
     }
     button {
       background: rgba(80, 140, 255, 0.3);
@@ -74,7 +78,7 @@
       border-radius: 6px;
       padding: 8px 12px;
       cursor: pointer;
-      font-size: 13px;
+      font-size: 16px;
       width: 100%;
       margin-top: 4px;
       transition: background 0.2s;
@@ -91,18 +95,18 @@
       border-radius: 12px;
       padding: 16px;
       color: #e0e0e0;
-      font-size: 14px;
+      font-size: 18px;
       min-width: 200px;
       box-shadow: 0 4px 24px rgba(0,0,0,0.3);
     }
     #energy-display h3 {
-      font-size: 14px;
+      font-size: 18px;
       margin-bottom: 8px;
       color: #fff;
     }
     .energy-value {
       font-family: 'Courier New', monospace;
-      font-size: 18px;
+      font-size: 22px;
       font-weight: bold;
       margin: 4px 0;
     }
@@ -110,7 +114,7 @@
     .energy-value.repulsive { color: #f44336; }
     .energy-value.neutral { color: #fff; }
     .energy-label {
-      font-size: 11px;
+      font-size: 14px;
       color: #888;
     }
 
@@ -124,12 +128,12 @@
       border-radius: 12px;
       padding: 16px;
       color: #e0e0e0;
-      font-size: 14px;
+      font-size: 18px;
       min-width: 200px;
       box-shadow: 0 4px 24px rgba(0,0,0,0.3);
     }
     #sim-stats h3 {
-      font-size: 14px;
+      font-size: 18px;
       margin-bottom: 8px;
       color: #fff;
     }
@@ -142,7 +146,7 @@
       background: rgba(0,0,0,0.5);
       color: #0f0;
       font-family: monospace;
-      font-size: 12px;
+      font-size: 15px;
       padding: 4px 8px;
       border-radius: 4px;
     }
@@ -156,7 +160,7 @@
     .toggle-btn {
       flex: 1;
       min-width: 60px;
-      font-size: 11px;
+      font-size: 14px;
       padding: 5px 4px;
     }
     .toggle-btn.active {
@@ -172,9 +176,15 @@
       transform: translateX(-50%);
       background: rgba(80, 140, 255, 0.5);
       padding: 12px 24px;
-      font-size: 16px;
+      font-size: 20px;
       border-radius: 8px;
       display: none;
+    }
+
+    /* Glossary term inside experiment prompts: hover for a short definition. */
+    .glossary {
+      border-bottom: 1px dotted rgba(120, 180, 255, 0.7);
+      cursor: help;
     }
 
     /* Loading overlay */
@@ -276,6 +286,8 @@
             <button class="toggle-btn active" id="toggle-sim-play">Play</button>
             <button class="toggle-btn" id="toggle-network">Network</button>
           </div>
+          <label style="margin-top: 8px;">Speed: <span id="sim-speed-value">1</span>x</label>
+          <input type="range" id="sim-speed-slider" min="1" max="20" step="1" value="1">
         </div>
       </div>
 
@@ -325,10 +337,10 @@
       <div id="fps-counter">-- FPS</div>
 
       <!-- Experiment prompt -->
-      <div id="experiment-prompt" style="display:none; position:absolute; bottom:60px; left:50%; transform:translateX(-50%); max-width:500px; width:90%; background:rgba(20,25,45,0.9); backdrop-filter:blur(8px); border-radius:12px; padding:16px 20px; color:#e0e0e0; font-size:13px; line-height:1.5; box-shadow:0 4px 24px rgba(0,0,0,0.4); border:1px solid rgba(80,140,255,0.2);">
+      <div id="experiment-prompt" style="display:none; position:absolute; bottom:60px; left:50%; transform:translateX(-50%); max-width:500px; width:90%; background:rgba(20,25,45,0.9); backdrop-filter:blur(8px); border-radius:12px; padding:16px 20px; color:#e0e0e0; font-size: 16px; line-height:1.5; box-shadow:0 4px 24px rgba(0,0,0,0.4); border:1px solid rgba(80,140,255,0.2);">
         <div style="display:flex; justify-content:space-between; align-items:start;">
           <p id="experiment-prompt-text" style="margin:0; flex:1;"></p>
-          <button id="close-experiment-prompt" style="background:none; border:none; color:#888; cursor:pointer; font-size:18px; padding:0 0 0 12px; min-width:auto; width:auto;">&times;</button>
+          <button id="close-experiment-prompt" style="background:none; border:none; color:#888; cursor:pointer; font-size: 22px; padding:0 0 0 12px; min-width:auto; width:auto;">&times;</button>
         </div>
       </div>
 

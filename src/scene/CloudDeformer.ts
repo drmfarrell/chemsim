@@ -1,3 +1,4 @@
+import * as THREE from 'three';
 import { MoleculeRenderer } from './MoleculeRenderer';
 import { DEFORMATION_SCALE, ANGSTROM_TO_SCENE } from '../utils/constants';
 import type { SimulationSystem } from '../wasm-pkg/chemsim_physics';
@@ -59,32 +60,27 @@ export class CloudDeformer {
       return;
     }
 
-    // Compute the world-space offset for the cloud vertices.
-    // The cloud vertices in the JSON share the same local coordinate frame as the atoms.
-    // The physics engine stores atoms at (local + offset), where offset was passed to
-    // addMoleculeToPhysics. The physics center = mean(atom_local) + offset.
-    // So: offset = physics_center - mean(atom_local).
-    // The cloud vertices in world space = cloud_local + offset.
-    const localCenter = data.atoms.reduce(
-      (acc, a) => ({ x: acc.x + a.x, y: acc.y + a.y, z: acc.z + a.z }),
-      { x: 0, y: 0, z: 0 },
-    );
-    const n = data.atoms.length;
-    localCenter.x /= n;
-    localCenter.y /= n;
-    localCenter.z /= n;
-
-    const offsetX = targetPos[0] - localCenter.x;
-    const offsetY = targetPos[1] - localCenter.y;
-    const offsetZ = targetPos[2] - localCenter.z;
-
-    // Transform cloud vertices to world space
+    // Transform cloud vertices into world coordinates using the molecule
+    // group's current world matrix. This captures both translation and any
+    // rotation the user has applied (in Mode 1) so the electric field is
+    // evaluated at the correct world position for each vertex.
+    const group = renderer.getGroup();
+    group.updateMatrixWorld();
+    const worldMatrix = group.matrixWorld;
+    const tmp = new THREE.Vector3();
     const flatVerts: number[] = [];
     for (const v of data.cloud_mesh.vertices) {
-      flatVerts.push(v[0] + offsetX, v[1] + offsetY, v[2] + offsetZ);
+      tmp.set(v[0], v[1], v[2]).applyMatrix4(worldMatrix);
+      // Scene coords are in the same units as physics (ANGSTROM_TO_SCENE = 1)
+      // but divide out explicitly so this keeps working if that ever changes.
+      flatVerts.push(
+        tmp.x / ANGSTROM_TO_SCENE,
+        tmp.y / ANGSTROM_TO_SCENE,
+        tmp.z / ANGSTROM_TO_SCENE,
+      );
     }
 
-    // Compute deformation via WASM physics engine
+    // Compute deformation via WASM physics engine (world-frame displacements).
     const deformations = this.physics.compute_deformation(
       targetMolIdx,
       sourceMolIdx,
@@ -93,7 +89,21 @@ export class CloudDeformer {
       effectiveScale,
     );
 
-    renderer.applyCloudDeformation(deformations);
+    // Rotate world-frame displacements back into the group's local frame so
+    // they can be applied as vertex offsets inside the rotated group without
+    // getting re-rotated by Three.js when it composes the world transform.
+    const worldToLocal = new THREE.Quaternion().copy(group.quaternion).invert();
+    const n = deformations.length / 3;
+    const localDeform = new Array<number>(deformations.length);
+    for (let i = 0; i < n; i++) {
+      tmp.set(deformations[i * 3], deformations[i * 3 + 1], deformations[i * 3 + 2])
+         .applyQuaternion(worldToLocal);
+      localDeform[i * 3] = tmp.x;
+      localDeform[i * 3 + 1] = tmp.y;
+      localDeform[i * 3 + 2] = tmp.z;
+    }
+
+    renderer.applyCloudDeformation(localDeform);
   }
 
   /**

@@ -90,7 +90,7 @@ pub fn verlet_velocity_step(
     }
 }
 
-/// Compute kinetic energy of all molecules
+/// Compute translational kinetic energy of all molecules
 /// KE = 0.5 * m * v^2 for each molecule
 /// Returns energy in kJ/mol (using conversion factor)
 pub fn kinetic_energy(molecules: &[Molecule]) -> f64 {
@@ -105,15 +105,30 @@ pub fn kinetic_energy(molecules: &[Molecule]) -> f64 {
     ke
 }
 
-/// Compute temperature from kinetic energy
-/// T = 2*KE / (3*N*k_B) where k_B = 0.00831446 kJ/(mol*K)
+/// Count the total number of active kinetic degrees of freedom. Each molecule
+/// contributes 3 translational DOF, plus 3 rotational DOF if it has >= 2
+/// atoms (i.e. a defined body frame from `init_rigid_body`). Single-atom or
+/// uninitialised molecules contribute translational only.
+pub fn total_dof(molecules: &[Molecule]) -> f64 {
+    let mut dof = 0.0;
+    for mol in molecules {
+        dof += 3.0;
+        if mol.body_coords.len() >= 2 {
+            dof += 3.0;
+        }
+    }
+    dof
+}
+
+/// Compute temperature from the total kinetic energy (translational plus
+/// rotational), using the equipartition relation
+///   KE = (DOF / 2) * k_B * T.
 pub fn compute_temperature(molecules: &[Molecule]) -> f64 {
-    let n = molecules.len() as f64;
-    if n < 1.0 { return 0.0; }
-    let ke = kinetic_energy(molecules);
+    let dof = total_dof(molecules);
+    if dof < 1.0 { return 0.0; }
+    let ke = kinetic_energy(molecules) + crate::rotation::rotational_kinetic_energy(molecules);
     let k_b = 0.00831446; // kJ/(mol*K)
-    // 3 translational degrees of freedom per molecule
-    2.0 * ke / (3.0 * n * k_b)
+    2.0 * ke / (dof * k_b)
 }
 
 #[cfg(test)]
@@ -132,6 +147,10 @@ mod tests {
             center_x: 0.0, center_y: 0.0, center_z: 0.0,
             vx, vy, vz,
             polarizability: 0.0,
+            body_coords: Vec::new(),
+            q: (1.0, 0.0, 0.0, 0.0),
+            omega_body: (0.0, 0.0, 0.0),
+            inertia: (1.0, 1.0, 1.0),
         }
     }
 

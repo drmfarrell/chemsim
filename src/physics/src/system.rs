@@ -6,6 +6,7 @@ use crate::lennard_jones::{lj_energy, lj_force};
 use crate::integrator::{verlet_position_step, verlet_velocity_step, kinetic_energy, compute_temperature};
 use crate::thermostat::{berendsen_thermostat, initialize_velocities};
 use crate::deformation::compute_cloud_deformation_flat;
+use crate::rotation::integrate_rotation;
 
 /// Input format for loading a molecule from JS
 #[derive(Deserialize)]
@@ -84,8 +85,13 @@ impl SimulationSystem {
             vy: 0.0,
             vz: 0.0,
             polarizability: input.polarizability,
+            body_coords: Vec::new(),
+            q: (1.0, 0.0, 0.0, 0.0),
+            omega_body: (0.0, 0.0, 0.0),
+            inertia: (1.0, 1.0, 1.0),
         };
         mol.compute_center();
+        mol.init_rigid_body();
 
         let idx = self.molecules.len();
         self.molecules.push(mol);
@@ -108,6 +114,26 @@ impl SimulationSystem {
         let dy = y - mol.center_y;
         let dz = z - mol.center_z;
         mol.translate(dx, dy, dz);
+    }
+
+    /// Set the orientation of a specific molecule (for the Mode 1 rotation
+    /// handler). The world-frame atom positions are rebuilt from the stored
+    /// body_coords so downstream energy calculations see the new orientation.
+    pub fn set_molecule_orientation(
+        &mut self,
+        idx: usize,
+        qw: f64,
+        qx: f64,
+        qy: f64,
+        qz: f64,
+    ) {
+        if idx >= self.molecules.len() { return; }
+        let mol = &mut self.molecules[idx];
+        if mol.body_coords.is_empty() { return; }
+        let mut q = (qw, qx, qy, qz);
+        crate::rotation::quat_normalize(&mut q);
+        mol.q = q;
+        crate::rotation::update_atom_positions(mol);
     }
 
     /// Get molecule center position
@@ -137,6 +163,20 @@ impl SimulationSystem {
             result.push(mol.center_x);
             result.push(mol.center_y);
             result.push(mol.center_z);
+        }
+        result
+    }
+
+    /// Get all molecule orientation quaternions as a flat array
+    /// [qw0, qx0, qy0, qz0, qw1, qx1, qy1, qz1, ...]. Three.js uses the
+    /// (x, y, z, w) order internally, so callers should convert.
+    pub fn get_all_orientations(&self) -> Vec<f64> {
+        let mut result = Vec::with_capacity(self.molecules.len() * 4);
+        for mol in &self.molecules {
+            result.push(mol.q.0);
+            result.push(mol.q.1);
+            result.push(mol.q.2);
+            result.push(mol.q.3);
         }
         result
     }
@@ -345,24 +385,30 @@ impl SimulationSystem {
         let n = self.molecules.len();
         if n == 0 { return; }
 
-        // Compute forces on each molecule
-        let forces = self.compute_all_forces();
+        // Compute forces and torques at current state.
+        let (forces, torques) = self.compute_all_forces();
 
-        // Velocity Verlet position step
+        // Velocity Verlet position step for translation.
         let old_accel = verlet_position_step(&mut self.molecules, &forces, self.timestep);
 
-        // Apply periodic boundary conditions
+        // Apply periodic boundary conditions to translational state.
         if self.use_periodic {
             self.apply_periodic_boundaries();
         }
 
-        // Compute new forces at updated positions
-        let new_forces = self.compute_all_forces();
+        // Semi-implicit Euler step for rotation (rebuilds world atom positions
+        // from the updated orientation).
+        integrate_rotation(&mut self.molecules, &torques, self.timestep);
 
-        // Velocity Verlet velocity step
+        // Compute new forces + torques at updated positions (discard new_torques
+        // because our semi-implicit rotation integrator only needs torque at
+        // the start of the step).
+        let (new_forces, _new_torques) = self.compute_all_forces();
+
+        // Velocity Verlet velocity step.
         verlet_velocity_step(&mut self.molecules, &old_accel, &new_forces, self.timestep);
 
-        // Apply thermostat
+        // Apply thermostat (rescales both translational and angular velocities).
         if self.use_thermostat {
             berendsen_thermostat(
                 &mut self.molecules,
@@ -441,31 +487,71 @@ impl SimulationSystem {
 
 // Private methods
 impl SimulationSystem {
-    fn compute_all_forces(&self) -> Vec<(f64, f64, f64)> {
+    fn compute_all_forces(&self) -> (Vec<(f64, f64, f64)>, Vec<(f64, f64, f64)>) {
         let n = self.molecules.len();
         let mut forces = vec![(0.0, 0.0, 0.0); n];
+        let mut torques = vec![(0.0, 0.0, 0.0); n];
         let cutoff2 = self.cutoff * self.cutoff;
 
         // Use cell list for large systems (> 30 molecules with periodic boundaries)
         if n > 30 && self.use_periodic {
-            self.compute_forces_cell_list(&mut forces, cutoff2);
+            self.compute_forces_cell_list(&mut forces, &mut torques, cutoff2);
         } else {
-            self.compute_forces_brute(&mut forces, cutoff2);
+            self.compute_forces_brute(&mut forces, &mut torques, cutoff2);
         }
 
-        forces
+        // Cap per-molecule force magnitude to prevent the integrator from
+        // exploding when two atoms briefly approach the LJ r^-12 singularity.
+        // This is far above any normal physical force (~1e3) so it only
+        // clamps genuine blow-ups, leaving the equilibrium dynamics untouched.
+        const MAX_FORCE: f64 = 1.0e4;
+        const MAX_FORCE_SQ: f64 = MAX_FORCE * MAX_FORCE;
+        for f in forces.iter_mut() {
+            let mag2 = f.0 * f.0 + f.1 * f.1 + f.2 * f.2;
+            if mag2 > MAX_FORCE_SQ {
+                let scale = MAX_FORCE / mag2.sqrt();
+                f.0 *= scale;
+                f.1 *= scale;
+                f.2 *= scale;
+            }
+        }
+
+        // Cap torque magnitude on the same principle. Torque units are
+        // kJ/mol; a typical molecular-scale torque is well under 1e4.
+        const MAX_TORQUE_SQ: f64 = MAX_FORCE_SQ;
+        for t in torques.iter_mut() {
+            let mag2 = t.0 * t.0 + t.1 * t.1 + t.2 * t.2;
+            if mag2 > MAX_TORQUE_SQ {
+                let scale = MAX_FORCE / mag2.sqrt();
+                t.0 *= scale;
+                t.1 *= scale;
+                t.2 *= scale;
+            }
+        }
+
+        (forces, torques)
     }
 
-    fn compute_forces_brute(&self, forces: &mut [(f64, f64, f64)], cutoff2: f64) {
+    fn compute_forces_brute(
+        &self,
+        forces: &mut [(f64, f64, f64)],
+        torques: &mut [(f64, f64, f64)],
+        cutoff2: f64,
+    ) {
         let n = self.molecules.len();
         for i in 0..n {
             for j in (i + 1)..n {
-                self.compute_pair_force(i, j, forces, cutoff2);
+                self.compute_pair_force(i, j, forces, torques, cutoff2);
             }
         }
     }
 
-    fn compute_forces_cell_list(&self, forces: &mut [(f64, f64, f64)], cutoff2: f64) {
+    fn compute_forces_cell_list(
+        &self,
+        forces: &mut [(f64, f64, f64)],
+        torques: &mut [(f64, f64, f64)],
+        cutoff2: f64,
+    ) {
         let n = self.molecules.len();
         let cell_size = self.cutoff;
         let n_cells = (self.box_size / cell_size).ceil() as usize;
@@ -511,7 +597,7 @@ impl SimulationSystem {
                                 for &i in &cells[cell_idx] {
                                     for &j in &cells[neighbor_idx] {
                                         if i < j {
-                                            self.compute_pair_force(i, j, forces, cutoff2);
+                                            self.compute_pair_force(i, j, forces, torques, cutoff2);
                                         }
                                     }
                                 }
@@ -523,7 +609,7 @@ impl SimulationSystem {
                     let cell = &cells[cell_idx];
                     for a in 0..cell.len() {
                         for b in (a + 1)..cell.len() {
-                            self.compute_pair_force(cell[a], cell[b], forces, cutoff2);
+                            self.compute_pair_force(cell[a], cell[b], forces, torques, cutoff2);
                         }
                     }
                 }
@@ -531,7 +617,14 @@ impl SimulationSystem {
         }
     }
 
-    fn compute_pair_force(&self, i: usize, j: usize, forces: &mut [(f64, f64, f64)], cutoff2: f64) {
+    fn compute_pair_force(
+        &self,
+        i: usize,
+        j: usize,
+        forces: &mut [(f64, f64, f64)],
+        torques: &mut [(f64, f64, f64)],
+        cutoff2: f64,
+    ) {
         let mol_a = &self.molecules[i];
         let mol_b = &self.molecules[j];
 
@@ -548,10 +641,36 @@ impl SimulationSystem {
         let r2 = dx * dx + dy * dy + dz * dz;
         if r2 > cutoff2 { return; }
 
+        // Periodic image offset from a to b so that pair forces use the
+        // minimum-image convention but lever arms remain each atom's
+        // offset from its own molecule's center.
+        let img_dx = dx - (mol_b.center_x - mol_a.center_x);
+        let img_dy = dy - (mol_b.center_y - mol_a.center_y);
+        let img_dz = dz - (mol_b.center_z - mol_a.center_z);
+
         for a_atom in &mol_a.atoms {
+            // Lever arm for molecule A: atom_a world - center_a
+            let rax = a_atom.x - mol_a.center_x;
+            let ray = a_atom.y - mol_a.center_y;
+            let raz = a_atom.z - mol_a.center_z;
+
             for b_atom in &mol_b.atoms {
-                let (cfx, cfy, cfz) = coulomb_force(a_atom, b_atom);
-                let (lfx, lfy, lfz) = lj_force(a_atom, b_atom);
+                // For cross-cell pair forces under PBC, temporarily shift b_atom
+                // into the same periodic image as a so force calculation uses
+                // the minimum-image distance.
+                let b_img = Atom {
+                    x: b_atom.x + img_dx,
+                    y: b_atom.y + img_dy,
+                    z: b_atom.z + img_dz,
+                    charge: b_atom.charge,
+                    epsilon: b_atom.epsilon,
+                    sigma: b_atom.sigma,
+                    mass: b_atom.mass,
+                    element: b_atom.element.clone(),
+                };
+
+                let (cfx, cfy, cfz) = coulomb_force(a_atom, &b_img);
+                let (lfx, lfy, lfz) = lj_force(a_atom, &b_img);
 
                 let fx = cfx + lfx;
                 let fy = cfy + lfy;
@@ -563,6 +682,20 @@ impl SimulationSystem {
                 forces[j].0 -= fx;
                 forces[j].1 -= fy;
                 forces[j].2 -= fz;
+
+                // Torque on A: r_a x F
+                torques[i].0 += ray * fz - raz * fy;
+                torques[i].1 += raz * fx - rax * fz;
+                torques[i].2 += rax * fy - ray * fx;
+
+                // Torque on B: r_b x (-F), where r_b is atom b's offset
+                // from its own center (lever arm is in B's local frame).
+                let rbx = b_atom.x - mol_b.center_x;
+                let rby = b_atom.y - mol_b.center_y;
+                let rbz = b_atom.z - mol_b.center_z;
+                torques[j].0 += rby * (-fz) - rbz * (-fy);
+                torques[j].1 += rbz * (-fx) - rbx * (-fz);
+                torques[j].2 += rbx * (-fy) - rby * (-fx);
             }
         }
     }

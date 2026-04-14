@@ -32,6 +32,11 @@ pub fn berendsen_thermostat(
         mol.vx *= lambda;
         mol.vy *= lambda;
         mol.vz *= lambda;
+        // Rescale angular velocity by the same factor so rotational KE is
+        // equipartitioned with translational KE.
+        mol.omega_body.0 *= lambda;
+        mol.omega_body.1 *= lambda;
+        mol.omega_body.2 *= lambda;
     }
 }
 
@@ -58,6 +63,20 @@ pub fn initialize_velocities(molecules: &mut [Molecule], target_temp: f64) {
         mol.vx = sigma * g1;
         mol.vy = sigma * g2;
         mol.vz = sigma * g3;
+
+        // Seed angular velocities for molecules with a defined body frame so
+        // rotational kinetic energy is initialised at the target temperature.
+        if mol.body_coords.len() >= 2 {
+            let (ix, iy, iz) = mol.inertia;
+            let (gx, gy) = gaussian_pair(&mut seed);
+            let (gz, _)  = gaussian_pair(&mut seed);
+            // sigma_omega = sqrt(k_B * T / (I * 100)), same conversion as
+            // translational (1 amu * Å^2 * (rad/ps)^2 = 0.01 kJ/mol).
+            let sx = (k_b * target_temp / (ix * 100.0)).sqrt();
+            let sy = (k_b * target_temp / (iy * 100.0)).sqrt();
+            let sz = (k_b * target_temp / (iz * 100.0)).sqrt();
+            mol.omega_body = (sx * gx, sy * gy, sz * gz);
+        }
     }
 
     // Remove center-of-mass velocity
@@ -130,6 +149,10 @@ mod tests {
             center_x: 0.0, center_y: 0.0, center_z: 0.0,
             vx: 0.0, vy: 0.0, vz: 0.0,
             polarizability: 0.0,
+            body_coords: Vec::new(),
+            q: (1.0, 0.0, 0.0, 0.0),
+            omega_body: (0.0, 0.0, 0.0),
+            inertia: (1.0, 1.0, 1.0),
         }).collect()
     }
 

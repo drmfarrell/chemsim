@@ -6,7 +6,7 @@ export const AVOGADRO = 6.02214076e23;
 // Lennard-Jones default parameters (in Angstroms and kJ/mol)
 // These are approximate, per-element defaults; real simulations use pair-specific values
 export const LJ_PARAMS: Record<string, { epsilon: number; sigma: number }> = {
-  H:  { epsilon: 0.0657, sigma: 2.50 },
+  H:  { epsilon: 0.01, sigma: 2.50 },
   C:  { epsilon: 0.4577, sigma: 3.40 },
   N:  { epsilon: 0.7113, sigma: 3.25 },
   O:  { epsilon: 0.6502, sigma: 3.12 },

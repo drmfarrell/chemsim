@@ -5,7 +5,7 @@ import { CloudDeformer } from './scene/CloudDeformer';
 import { InteractionVisualizer, InteractionData } from './scene/InteractionVisualizer';
 import { VRManager } from './scene/VRManager';
 import { loadMolecule, MoleculeData, MOLECULE_LIST } from './utils/loader';
-import { LJ_PARAMS, ANGSTROM_TO_SCENE, DEFAULT_TEMPERATURE, DEFAULT_BOX_SIZE, DEFAULT_MOLECULE_COUNT } from './utils/constants';
+import { LJ_PARAMS, ANGSTROM_TO_SCENE, DEFAULT_TEMPERATURE, DEFAULT_MOLECULE_COUNT } from './utils/constants';
 import { Tutorial } from './ui/Tutorial';
 import { EXPERIMENTS, Experiment } from './ui/Experiments';
 import init, { SimulationSystem } from './wasm-pkg/chemsim_physics';
@@ -37,10 +37,15 @@ let boxMoleculeData: MoleculeData | null = null;
 let boxGroup: THREE.Group | null = null;
 let boxHelper: THREE.LineSegments | null = null;
 let isSimulationRunning = false;
+let simSpeedMultiplier = 1;
 let showInteractionNetwork = false;
 let networkLines: THREE.LineSegments | null = null;
 let statsUpdateCounter = 0;
 let tutorial: Tutorial;
+
+// Incremented on each load; in-flight loads whose token is stale bail out
+// so overlapping load calls cannot both commit and strand meshes in the scene.
+let loadToken = 0;
 
 // Element mass lookup
 const ELEMENT_MASS: Record<string, number> = {
@@ -231,6 +236,14 @@ function setupUI(): void {
     btn.classList.toggle('active', isSimulationRunning);
   });
 
+  // Mode 2: Speed slider
+  const speedSlider = document.getElementById('sim-speed-slider') as HTMLInputElement;
+  const speedValue = document.getElementById('sim-speed-value') as HTMLSpanElement;
+  speedSlider.addEventListener('input', () => {
+    simSpeedMultiplier = parseInt(speedSlider.value);
+    speedValue.textContent = speedSlider.value;
+  });
+
   // Mode 2: Interaction network
   document.getElementById('toggle-network')!.addEventListener('click', (e) => {
     const btn = e.target as HTMLButtonElement;
@@ -297,7 +310,10 @@ function loadExperiment(exp: Experiment): void {
   const promptEl = document.getElementById('experiment-prompt');
   const promptText = document.getElementById('experiment-prompt-text');
   if (promptEl && promptText) {
-    promptText.textContent = exp.prompt;
+    // Prompts may contain inline <span class="glossary" title="..."> markup
+    // for hover-definitions. The text comes from static code in
+    // Experiments.ts, so innerHTML is safe here.
+    promptText.innerHTML = exp.prompt;
     promptEl.style.display = 'block';
   }
 
@@ -305,15 +321,15 @@ function loadExperiment(exp: Experiment): void {
   const modeSelector = document.getElementById('mode-selector') as HTMLSelectElement;
 
   if (exp.mode === 'mode1') {
-    modeSelector.value = 'mode1';
-    switchMode('mode1');
-
-    // Set molecules
+    // Set molecule selectors first so switchMode/loadMode1Pair picks up the
+    // experiment's molecules rather than whatever was previously loaded.
     const selA = document.getElementById('molecule-a-selector') as HTMLSelectElement;
     const selB = document.getElementById('molecule-b-selector') as HTMLSelectElement;
     selA.value = exp.moleculeA;
     if (exp.moleculeB) selB.value = exp.moleculeB;
-    loadMode1Pair(selA.value, selB.value);
+
+    modeSelector.value = 'mode1';
+    switchMode('mode1');
   } else {
     // Set temperature and count before switching mode
     if (exp.temperature) {
@@ -462,6 +478,12 @@ function onPointerMove(event: PointerEvent): void {
 
     group.rotateOnWorldAxis(camUp, dx * rotSpeed);
     group.rotateOnWorldAxis(camRight, -dy * rotSpeed);
+
+    // Propagate the new orientation to the physics engine so the next energy
+    // calculation reflects the rotation. Three.js stores quaternions as
+    // (x, y, z, w); the WASM API expects (w, x, y, z).
+    const q = group.quaternion;
+    physics.set_molecule_orientation(1, q.w, q.x, q.y, q.z);
   }
 
   prevMouse.copy(mouse);
@@ -504,21 +526,29 @@ function updateMode2(_dt: number): void {
   if (boxMolecules.length === 0) return;
 
   if (isSimulationRunning) {
-    // Run physics steps (multiple sub-steps per frame for stability)
-    const stepsPerFrame = 5;
+    // Run physics steps (multiple sub-steps per frame for stability).
+    // Speed multiplier lets the user fast-forward equilibration.
+    const stepsPerFrame = 5 * simSpeedMultiplier;
     physics.step_n(stepsPerFrame);
 
-    // Update molecule positions from physics
+    // Update each molecule's group transform from physics. We drive the
+    // group's position and quaternion; the atom meshes live in the group's
+    // body frame (set at construction) so Three.js handles the rigid-body
+    // transform for us. No updateAtomPositions call is needed in box mode.
     const positions = physics.get_all_positions();
+    const orientations = physics.get_all_orientations();
     for (let i = 0; i < boxMolecules.length; i++) {
       const x = positions[i * 3] * ANGSTROM_TO_SCENE;
       const y = positions[i * 3 + 1] * ANGSTROM_TO_SCENE;
       const z = positions[i * 3 + 2] * ANGSTROM_TO_SCENE;
-      boxMolecules[i].getGroup().position.set(x, y, z);
-
-      // Update individual atom positions
-      const atomPos = physics.get_atom_positions(i);
-      boxMolecules[i].updateAtomPositions(Array.from(atomPos));
+      const group = boxMolecules[i].getGroup();
+      group.position.set(x, y, z);
+      // WASM returns (w, x, y, z); Three.js Quaternion.set takes (x, y, z, w).
+      const qw = orientations[i * 4];
+      const qx = orientations[i * 4 + 1];
+      const qy = orientations[i * 4 + 2];
+      const qz = orientations[i * 4 + 3];
+      group.quaternion.set(qx, qy, qz, qw);
     }
   }
 
@@ -612,18 +642,27 @@ function updateInteractionNetwork(): void {
 }
 
 async function loadMode1Pair(nameA: string, nameB: string): Promise<void> {
-  // Clean up existing
-  moleculeA?.dispose();
-  moleculeB?.dispose();
-  moleculeA = null;
-  moleculeB = null;
-  physics.clear();
-  interactionViz.clear();
+  const myToken = ++loadToken;
 
   try {
-    // Load data
-    moleculeAData = await loadMolecule(nameA);
-    moleculeBData = await loadMolecule(nameB);
+    // Load data (may await). Defer scene/physics mutation until after the
+    // await so a later call that supersedes us can bail out cleanly.
+    const aData = await loadMolecule(nameA);
+    const bData = await loadMolecule(nameB);
+    if (myToken !== loadToken) return;
+
+    // Clean up anything currently attached, including meshes committed by
+    // a prior in-flight call whose awaits resolved before ours.
+    moleculeA?.dispose();
+    moleculeB?.dispose();
+    moleculeA = null;
+    moleculeB = null;
+    clearMode2();
+    physics.clear();
+    interactionViz.clear();
+
+    moleculeAData = aData;
+    moleculeBData = bData;
 
     // Create renderers
     moleculeA = new MoleculeRenderer(moleculeAData);
@@ -668,15 +707,31 @@ function addMoleculeToPhysics(data: MoleculeData, cx: number, cy: number, cz: nu
 }
 
 async function loadMode2(moleculeName: string, count: number): Promise<void> {
-  // Clean up
-  clearMode2();
-  physics.clear();
+  const myToken = ++loadToken;
   isSimulationRunning = false;
 
   try {
-    boxMoleculeData = await loadMolecule(moleculeName);
+    const data = await loadMolecule(moleculeName);
+    if (myToken !== loadToken) return;
 
-    const boxSize = DEFAULT_BOX_SIZE;
+    // Clean up anything currently attached, including a stray mode1 pair
+    // that a superseded load may have committed.
+    moleculeA?.dispose();
+    moleculeB?.dispose();
+    moleculeA = null;
+    moleculeB = null;
+    clearMode2();
+    physics.clear();
+    interactionViz.clear();
+
+    boxMoleculeData = data;
+
+    // Scale box with molecule count to hold roughly constant density (~4.5 A
+    // spacing, near liquid water). Small counts get a small box so molecules
+    // can actually find each other; larger counts expand the box instead of
+    // packing tighter and blowing up the force calculation.
+    const targetSpacing = 4.5;
+    const boxSize = Math.max(10, targetSpacing * Math.cbrt(count));
     physics.set_box_size(boxSize);
     physics.set_periodic(true);
     physics.set_thermostat(true);
@@ -701,17 +756,22 @@ async function loadMode2(moleculeName: string, count: number): Promise<void> {
     boxGeo.dispose();
     sceneManager.scene.add(boxHelper);
 
-    // Place molecules randomly in the box
-    const spacing = boxSize / Math.cbrt(count);
+    // Place molecules on a uniform grid that fits inside the box. Using
+    // ceil(cbrt(count)) positions per axis guarantees count^3 slots so we
+    // never loop past the grid looking for space for a molecule that won't
+    // fit (the old code had an unbounded outer loop that spun forever if
+    // rounding made the grid too small for `count` placements).
+    const perSide = Math.ceil(Math.cbrt(count));
+    const spacing = boxSize / perSide;
     let placed = 0;
-    for (let ix = 0; placed < count; ix++) {
-      for (let iy = 0; iy < Math.ceil(Math.cbrt(count)) && placed < count; iy++) {
-        for (let iz = 0; iz < Math.ceil(Math.cbrt(count)) && placed < count; iz++) {
+    outer:
+    for (let ix = 0; ix < perSide; ix++) {
+      for (let iy = 0; iy < perSide; iy++) {
+        for (let iz = 0; iz < perSide; iz++) {
+          if (placed >= count) break outer;
           const x = -halfBox / ANGSTROM_TO_SCENE + spacing * (ix + 0.5);
           const y = -halfBox / ANGSTROM_TO_SCENE + spacing * (iy + 0.5);
           const z = -halfBox / ANGSTROM_TO_SCENE + spacing * (iz + 0.5);
-
-          if (Math.abs(x) > boxSize / 2 || Math.abs(y) > boxSize / 2 || Math.abs(z) > boxSize / 2) continue;
 
           addMoleculeToPhysics(boxMoleculeData, x, y, z);
 
@@ -721,8 +781,11 @@ async function loadMode2(moleculeName: string, count: number): Promise<void> {
             y * ANGSTROM_TO_SCENE,
             z * ANGSTROM_TO_SCENE,
           );
-          // Disable cloud in box mode for performance
-          renderer.setCloudVisible(false);
+          // Respect the current Cloud toggle state so clouds appear in box
+          // mode too. The O(N^2) cloud deformer is not invoked in updateMode2,
+          // so clouds render as static semi-transparent spheres (cheap on GPU).
+          const cloudOn = document.getElementById('toggle-cloud')?.classList.contains('active') ?? true;
+          renderer.setCloudVisible(cloudOn);
           sceneManager.scene.add(renderer.getGroup());
           boxMolecules.push(renderer);
           placed++;
