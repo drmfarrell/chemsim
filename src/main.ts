@@ -8,7 +8,7 @@ import { loadMolecule, MoleculeData, MOLECULE_LIST } from './utils/loader';
 import { LJ_PARAMS, ANGSTROM_TO_SCENE, DEFAULT_TEMPERATURE, DEFAULT_MOLECULE_COUNT } from './utils/constants';
 import { Tutorial } from './ui/Tutorial';
 import { EXPERIMENTS, Experiment } from './ui/Experiments';
-import init, { SimulationSystem } from './wasm-pkg/chemsim_physics';
+import init, { SimulationSystem, initThreadPool } from './wasm-pkg/chemsim_physics';
 
 // Molecule count presets for box mode (perfect cubes for even grid placement)
 const MOLECULE_COUNT_PRESETS = [8, 27, 64, 125, 216]; // 2³, 3³, 4³, 5³, 6³ - capped for smooth animation
@@ -88,6 +88,23 @@ const ELEMENT_MASS: Record<string, number> = {
 async function main() {
   // Initialize WASM
   await init();
+
+  // Spin up rayon's thread pool so the physics force loop can use multiple
+  // cores. Requires SharedArrayBuffer (COOP/COEP headers are set in
+  // vite.config.ts). Falls back to serial silently if the browser can't
+  // create the pool (e.g. headers not respected, crossOriginIsolated=false).
+  const coi = (globalThis as any).crossOriginIsolated;
+  if (coi === true) {
+    try {
+      const nCores = Math.max(2, Math.min(8, navigator.hardwareConcurrency || 4));
+      await initThreadPool(nCores);
+      console.log(`ChemSim: rayon thread pool initialized with ${nCores} threads`);
+    } catch (e) {
+      console.warn('ChemSim: failed to initialize rayon thread pool, running single-threaded:', e);
+    }
+  } else {
+    console.warn(`ChemSim: crossOriginIsolated=${coi}, running single-threaded. Ensure COOP/COEP headers reach the browser (service worker cache can strip them).`);
+  }
 
   // Set up Three.js scene
   sceneManager = new SceneManager('canvas-container');

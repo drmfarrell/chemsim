@@ -17,6 +17,12 @@ pub use deformation::*;
 pub use rotation::*;
 pub use system::*;
 
+// Re-export wasm-bindgen-rayon's thread-pool initializer when parallel is on.
+// JS must call `initThreadPool(n)` (n = navigator.hardwareConcurrency) and
+// await it before running the sim; otherwise rayon falls back to single-thread.
+#[cfg(feature = "parallel")]
+pub use wasm_bindgen_rayon::init_thread_pool;
+
 #[wasm_bindgen]
 extern "C" {
     #[wasm_bindgen(js_namespace = console)]

@@ -40,6 +40,34 @@ struct AtomInput {
 /// Hence pressure in bar = pressure in kJ/(mol*A^3) * BAR_PER_KJ_MOL_A3.
 const BAR_PER_KJ_MOL_A3: f64 = 16605.39;
 
+/// Forces and torques a single pair interaction contributes to both molecules,
+/// plus its virial contribution. Returned from the pure `compute_pair_force` so
+/// parallel callers can accumulate into thread-local buffers without locks.
+#[derive(Clone, Copy, Default)]
+struct PairDelta {
+    f_i: (f64, f64, f64),
+    f_j: (f64, f64, f64),
+    t_i: (f64, f64, f64),
+    t_j: (f64, f64, f64),
+    virial: f64,
+}
+
+#[inline(always)]
+fn apply_pair(
+    delta: &PairDelta,
+    i: usize,
+    j: usize,
+    forces: &mut [(f64, f64, f64)],
+    torques: &mut [(f64, f64, f64)],
+    virial: &mut f64,
+) {
+    forces[i].0 += delta.f_i.0; forces[i].1 += delta.f_i.1; forces[i].2 += delta.f_i.2;
+    forces[j].0 += delta.f_j.0; forces[j].1 += delta.f_j.1; forces[j].2 += delta.f_j.2;
+    torques[i].0 += delta.t_i.0; torques[i].1 += delta.t_i.1; torques[i].2 += delta.t_i.2;
+    torques[j].0 += delta.t_j.0; torques[j].1 += delta.t_j.1; torques[j].2 += delta.t_j.2;
+    *virial += delta.virial;
+}
+
 /// The main simulation system exposed to JavaScript
 #[wasm_bindgen]
 pub struct SimulationSystem {
@@ -718,9 +746,26 @@ impl SimulationSystem {
         let mut virial = 0.0;
         let cutoff2 = self.cutoff * self.cutoff;
 
-        // Use cell list for large systems (> 30 molecules with periodic boundaries)
+        // Use cell list for large systems (> 30 molecules with periodic boundaries).
+        // Above ~80 molecules the rayon overhead of fold+reduce pays off, so we
+        // hand off to the parallel cell-list. Smaller systems stay serial.
         if n > 30 && self.use_periodic {
-            self.compute_forces_cell_list(&mut forces, &mut torques, &mut virial, cutoff2);
+            #[cfg(feature = "parallel")]
+            {
+                if n > 80 {
+                    self.compute_forces_cell_list_parallel(
+                        &mut forces, &mut torques, &mut virial, cutoff2,
+                    );
+                } else {
+                    self.compute_forces_cell_list(
+                        &mut forces, &mut torques, &mut virial, cutoff2,
+                    );
+                }
+            }
+            #[cfg(not(feature = "parallel"))]
+            {
+                self.compute_forces_cell_list(&mut forces, &mut torques, &mut virial, cutoff2);
+            }
         } else {
             self.compute_forces_brute(&mut forces, &mut torques, &mut virial, cutoff2);
         }
@@ -767,7 +812,9 @@ impl SimulationSystem {
         let n = self.molecules.len();
         for i in 0..n {
             for j in (i + 1)..n {
-                self.compute_pair_force(i, j, forces, torques, virial, cutoff2);
+                if let Some(d) = self.compute_pair_force(i, j, cutoff2) {
+                    apply_pair(&d, i, j, forces, torques, virial);
+                }
             }
         }
     }
@@ -811,7 +858,9 @@ impl SimulationSystem {
                     let cell = &cells[cell_idx];
                     for a in 0..cell.len() {
                         for b in (a + 1)..cell.len() {
-                            self.compute_pair_force(cell[a], cell[b], forces, torques, virial, cutoff2);
+                            if let Some(d) = self.compute_pair_force(cell[a], cell[b], cutoff2) {
+                                apply_pair(&d, cell[a], cell[b], forces, torques, virial);
+                            }
                         }
                     }
 
@@ -830,7 +879,9 @@ impl SimulationSystem {
                                 // Compute forces between all pairs in cell_idx and neighbor_idx
                                 for &i in &cells[cell_idx] {
                                     for &j in &cells[neighbor_idx] {
-                                        self.compute_pair_force(i, j, forces, torques, virial, cutoff2);
+                                        if let Some(d) = self.compute_pair_force(i, j, cutoff2) {
+                                            apply_pair(&d, i, j, forces, torques, virial);
+                                        }
                                     }
                                 }
                             }
@@ -841,15 +892,109 @@ impl SimulationSystem {
         }
     }
 
-    fn compute_pair_force(
+    /// Parallel cell-list force computation. Same half-shell neighbor pattern
+    /// as the serial version; each rayon chunk accumulates into thread-local
+    /// `Vec`s that are summed in the reduce step, so there are no shared
+    /// mutations inside the parallel loop.
+    #[cfg(feature = "parallel")]
+    fn compute_forces_cell_list_parallel(
         &self,
-        i: usize,
-        j: usize,
         forces: &mut [(f64, f64, f64)],
         torques: &mut [(f64, f64, f64)],
         virial: &mut f64,
         cutoff2: f64,
     ) {
+        use rayon::prelude::*;
+        let n = self.molecules.len();
+        let cell_size = self.cutoff;
+        let n_cells = ((self.box_size / cell_size).ceil() as usize).max(1);
+        let total_cells = n_cells * n_cells * n_cells;
+
+        // Build cell list (serial; O(N) and fast).
+        let mut cells: Vec<Vec<usize>> = vec![Vec::new(); total_cells];
+        let half = self.box_size / 2.0;
+        for i in 0..n {
+            let mol = &self.molecules[i];
+            let cx = (((mol.center_x + half) / cell_size) as usize).min(n_cells - 1);
+            let cy = (((mol.center_y + half) / cell_size) as usize).min(n_cells - 1);
+            let cz = (((mol.center_z + half) / cell_size) as usize).min(n_cells - 1);
+            let idx = cx * n_cells * n_cells + cy * n_cells + cz;
+            if idx < total_cells {
+                cells[idx].push(i);
+            }
+        }
+
+        // Reduce-friendly accumulator type.
+        type Acc = (Vec<(f64, f64, f64)>, Vec<(f64, f64, f64)>, f64);
+        let make_acc = || -> Acc {
+            (vec![(0.0, 0.0, 0.0); n], vec![(0.0, 0.0, 0.0); n], 0.0)
+        };
+
+        let (pf, pt, pv) = (0..total_cells)
+            .into_par_iter()
+            .fold(make_acc, |(mut fs, mut ts, mut v), cell_idx| {
+                let cz = cell_idx % n_cells;
+                let cy = (cell_idx / n_cells) % n_cells;
+                let cx = cell_idx / (n_cells * n_cells);
+
+                // Intra-cell pairs
+                let cell = &cells[cell_idx];
+                for a in 0..cell.len() {
+                    for b in (a + 1)..cell.len() {
+                        if let Some(d) = self.compute_pair_force(cell[a], cell[b], cutoff2) {
+                            apply_pair(&d, cell[a], cell[b], &mut fs, &mut ts, &mut v);
+                        }
+                    }
+                }
+
+                // Forward-neighbor inter-cell pairs (13-direction half-shell).
+                for dcx in 0..=1_i32 {
+                    let start_cy = if dcx == 0 { 0 } else { -1_i32 };
+                    for dcy in start_cy..=1_i32 {
+                        let start_cz = if dcx == 0 && dcy == 0 { 1 } else { -1_i32 };
+                        for dcz in start_cz..=1_i32 {
+                            let nx = (cx as i32 + dcx).rem_euclid(n_cells as i32) as usize;
+                            let ny = (cy as i32 + dcy).rem_euclid(n_cells as i32) as usize;
+                            let nz = (cz as i32 + dcz).rem_euclid(n_cells as i32) as usize;
+                            let neighbor_idx = nx * n_cells * n_cells + ny * n_cells + nz;
+
+                            for &i in &cells[cell_idx] {
+                                for &j in &cells[neighbor_idx] {
+                                    if let Some(d) = self.compute_pair_force(i, j, cutoff2) {
+                                        apply_pair(&d, i, j, &mut fs, &mut ts, &mut v);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                (fs, ts, v)
+            })
+            .reduce(make_acc, |(mut af, mut at, av), (bf, bt, bv)| {
+                for k in 0..n {
+                    af[k].0 += bf[k].0; af[k].1 += bf[k].1; af[k].2 += bf[k].2;
+                    at[k].0 += bt[k].0; at[k].1 += bt[k].1; at[k].2 += bt[k].2;
+                }
+                (af, at, av + bv)
+            });
+
+        // Merge reduced buffers into caller's outputs.
+        for k in 0..n {
+            forces[k].0 += pf[k].0; forces[k].1 += pf[k].1; forces[k].2 += pf[k].2;
+            torques[k].0 += pt[k].0; torques[k].1 += pt[k].1; torques[k].2 += pt[k].2;
+        }
+        *virial += pv;
+    }
+
+    /// Pure pair-force calculation: returns the forces, torques, and virial
+    /// this interaction contributes, so callers (serial *or* parallel) can
+    /// accumulate into their own buffers. Returns `None` if outside cutoff.
+    fn compute_pair_force(
+        &self,
+        i: usize,
+        j: usize,
+        cutoff2: f64,
+    ) -> Option<PairDelta> {
         let mol_a = &self.molecules[i];
         let mol_b = &self.molecules[j];
 
@@ -864,7 +1009,11 @@ impl SimulationSystem {
         }
 
         let r2 = dx * dx + dy * dy + dz * dz;
-        if r2 > cutoff2 { return; }
+        if r2 > cutoff2 { return None; }
+
+        // Local accumulators (faster than repeated indexed writes and safe
+        // for parallel callers since we only return the delta).
+        let mut d = PairDelta::default();
 
         // Periodic image offset from a to b so that pair forces use the
         // minimum-image convention but lever arms remain each atom's
@@ -946,12 +1095,8 @@ impl SimulationSystem {
                 let fy = cfy + lfy;
                 let fz = cfz + lfz;
 
-                forces[i].0 += fx;
-                forces[i].1 += fy;
-                forces[i].2 += fz;
-                forces[j].0 -= fx;
-                forces[j].1 -= fy;
-                forces[j].2 -= fz;
+                d.f_i.0 += fx; d.f_i.1 += fy; d.f_i.2 += fz;
+                d.f_j.0 -= fx; d.f_j.1 -= fy; d.f_j.2 -= fz;
 
                 // Atom-atom virial contribution: r_ab . F_on_a (with r_ab
                 // using the minimum-image position of b). Sums to the scalar
@@ -960,42 +1105,38 @@ impl SimulationSystem {
                 let rdx = a_atom.x - b_img.x;
                 let rdy = a_atom.y - b_img.y;
                 let rdz = a_atom.z - b_img.z;
-                *virial += rdx * fx + rdy * fy + rdz * fz;
+                d.virial += rdx * fx + rdy * fy + rdz * fz;
 
                 // Torque on A: r_a x F
-                torques[i].0 += ray * fz - raz * fy;
-                torques[i].1 += raz * fx - rax * fz;
-                torques[i].2 += rax * fy - ray * fx;
+                d.t_i.0 += ray * fz - raz * fy;
+                d.t_i.1 += raz * fx - rax * fz;
+                d.t_i.2 += rax * fy - ray * fx;
 
                 // Torque on B: r_b x (-F), where r_b is atom b's offset
                 // from its own center (lever arm is in B's local frame).
                 let rbx = b_atom.x - mol_b.center_x;
                 let rby = b_atom.y - mol_b.center_y;
                 let rbz = b_atom.z - mol_b.center_z;
-                torques[j].0 += rby * (-fz) - rbz * (-fy);
-                torques[j].1 += rbz * (-fx) - rbx * (-fz);
-                torques[j].2 += rbx * (-fy) - rby * (-fx);
+                d.t_j.0 += rby * (-fz) - rbz * (-fy);
+                d.t_j.1 += rbz * (-fx) - rbx * (-fz);
+                d.t_j.2 += rbx * (-fy) - rby * (-fx);
             }
 
             // A atom interacting with B's virtual sites (Coulomb only)
             for &(vx, vy, vz, vq) in &b_virt_sites {
                 let (fx, fy, fz) = coulomb_to_atom(a_atom.x, a_atom.y, a_atom.z, a_atom.charge, vx, vy, vz, vq);
 
-                forces[i].0 += fx;
-                forces[i].1 += fy;
-                forces[i].2 += fz;
-                forces[j].0 -= fx;
-                forces[j].1 -= fy;
-                forces[j].2 -= fz;
+                d.f_i.0 += fx; d.f_i.1 += fy; d.f_i.2 += fz;
+                d.f_j.0 -= fx; d.f_j.1 -= fy; d.f_j.2 -= fz;
 
                 let rdx = a_atom.x - vx;
                 let rdy = a_atom.y - vy;
                 let rdz = a_atom.z - vz;
-                *virial += rdx * fx + rdy * fy + rdz * fz;
+                d.virial += rdx * fx + rdy * fy + rdz * fz;
 
-                torques[i].0 += ray * fz - raz * fy;
-                torques[i].1 += raz * fx - rax * fz;
-                torques[i].2 += rax * fy - ray * fx;
+                d.t_i.0 += ray * fz - raz * fy;
+                d.t_i.1 += raz * fx - rax * fz;
+                d.t_i.2 += rax * fy - ray * fx;
                 // Torque on B from virtual site: virtual site has no lever arm (at molecular center)
                 // so no torque contribution
             }
@@ -1004,10 +1145,8 @@ impl SimulationSystem {
         // A's virtual sites interacting with B's atoms
         for &(vx, vy, vz, vq) in &a_virt_sites {
             for b_atom in &mol_b.atoms {
-                // Lever arm for virtual site (assumed at molecular center)
-                let rax = 0.0;
-                let ray = 0.0;
-                let raz = 0.0;
+                // Lever arm for virtual site (assumed at molecular center):
+                // no torque contribution for molecule A from this interaction.
 
                 let b_img_x = b_atom.x + img_dx;
                 let b_img_y = b_atom.y + img_dy;
@@ -1024,39 +1163,33 @@ impl SimulationSystem {
                 let fy = f_scale * dy;
                 let fz = f_scale * dz;
 
-                forces[i].0 += fx;
-                forces[i].1 += fy;
-                forces[i].2 += fz;
-                forces[j].0 -= fx;
-                forces[j].1 -= fy;
-                forces[j].2 -= fz;
+                d.f_i.0 += fx; d.f_i.1 += fy; d.f_i.2 += fz;
+                d.f_j.0 -= fx; d.f_j.1 -= fy; d.f_j.2 -= fz;
 
-                *virial += (vx - b_img_x) * fx + (vy - b_img_y) * fy + (vz - b_img_z) * fz;
+                d.virial += (vx - b_img_x) * fx + (vy - b_img_y) * fy + (vz - b_img_z) * fz;
                 // No torque on A (virtual site at center)
                 // Torque on B
                 let rbx = b_atom.x - mol_b.center_x;
                 let rby = b_atom.y - mol_b.center_y;
                 let rbz = b_atom.z - mol_b.center_z;
-                torques[j].0 += rby * (-fz) - rbz * (-fy);
-                torques[j].1 += rbz * (-fx) - rbx * (-fz);
-                torques[j].2 += rbx * (-fy) - rby * (-fx);
+                d.t_j.0 += rby * (-fz) - rbz * (-fy);
+                d.t_j.1 += rbz * (-fx) - rbx * (-fz);
+                d.t_j.2 += rbx * (-fy) - rby * (-fx);
             }
 
             // Virtual site - virtual site interactions
             for &(bx, by, bz, bq) in &b_virt_sites {
                 let (fx, fy, fz) = coulomb_site_site(vx, vy, vz, vq, bx, by, bz, bq);
 
-                forces[i].0 += fx;
-                forces[i].1 += fy;
-                forces[i].2 += fz;
-                forces[j].0 -= fx;
-                forces[j].1 -= fy;
-                forces[j].2 -= fz;
+                d.f_i.0 += fx; d.f_i.1 += fy; d.f_i.2 += fz;
+                d.f_j.0 -= fx; d.f_j.1 -= fy; d.f_j.2 -= fz;
 
-                *virial += (vx - bx) * fx + (vy - by) * fy + (vz - bz) * fz;
+                d.virial += (vx - bx) * fx + (vy - by) * fy + (vz - bz) * fz;
                 // No torque contribution (virtual sites at molecular centers)
             }
         }
+
+        Some(d)
     }
 
     fn apply_periodic_boundaries(&mut self) {

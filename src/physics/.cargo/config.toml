@@ -1,0 +1,21 @@
+# WASM threading support for wasm-bindgen-rayon.
+# target-feature=+atomics,+bulk-memory produces atomic wasm ops.
+# The link-args force the wasm linker to emit a *shared, imported* memory,
+# which wasm-bindgen-rayon's startWorkers needs to postMessage to workers.
+# build-std rebuilds libstd with the same target features so its internal
+# sync primitives are actually atomic. Requires nightly (pinned in
+# rust-toolchain.toml) for -Z build-std.
+[target.wasm32-unknown-unknown]
+rustflags = [
+  "-C", "target-feature=+atomics,+bulk-memory,+mutable-globals",
+  "-C", "link-arg=--shared-memory",
+  "-C", "link-arg=--import-memory",
+  "-C", "link-arg=--max-memory=4294967296",
+  "-C", "link-arg=--export=__wasm_init_tls",
+  "-C", "link-arg=--export=__tls_size",
+  "-C", "link-arg=--export=__tls_align",
+  "-C", "link-arg=--export=__tls_base",
+]
+
+[unstable]
+build-std = ["panic_abort", "std"]
