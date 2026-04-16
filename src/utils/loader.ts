@@ -5,6 +5,8 @@ export interface AtomData {
   z: number;
   charge: number;
   vdw_radius: number;
+  epsilon?: number;  // Optional molecule-specific LJ epsilon
+  sigma?: number;    // Optional molecule-specific LJ sigma
 }
 
 export interface BondData {
@@ -19,6 +21,12 @@ export interface CloudMeshData {
   potentials: number[];
 }
 
+export interface VirtualSiteData {
+  charge: number;
+  ref_atoms: number[];  // Indices of atoms used to compute position
+  site_type: string;    // e.g., "tip4p"
+}
+
 export interface MoleculeData {
   name: string;
   formula: string;
@@ -28,6 +36,7 @@ export interface MoleculeData {
   polarizability: number;
   dipole_moment: number;
   molecular_weight: number;
+  virtual_sites?: VirtualSiteData[];  // Optional virtual sites (e.g., TIP4P M site)
 }
 
 const moleculeCache = new Map<string, MoleculeData>();
@@ -58,6 +67,8 @@ export async function loadAllMolecules(): Promise<Map<string, MoleculeData>> {
     'tetrafluoromethane',
     'ammonia',
     'urea',
+    'sodium_ion',
+    'chloride_ion',
   ];
 
   const results = await Promise.all(names.map(loadMolecule));
@@ -84,4 +95,6 @@ export const MOLECULE_LIST = [
   { id: 'tetrafluoromethane', formula: 'CF\u2084', name: 'Tetrafluoromethane' },
   { id: 'ammonia', formula: 'NH\u2083', name: 'Ammonia' },
   { id: 'urea', formula: 'CH\u2084N\u2082O', name: 'Urea' },
+  { id: 'sodium_ion', formula: 'Na\u207A', name: 'Sodium Ion' },
+  { id: 'chloride_ion', formula: 'Cl\u207B', name: 'Chloride Ion' },
 ];

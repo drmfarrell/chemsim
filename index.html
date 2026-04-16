@@ -138,6 +138,36 @@
       color: #fff;
     }
 
+    /* Depth slab clip control (bottom center) */
+    #slab-clip {
+      position: absolute;
+      bottom: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(20, 20, 30, 0.85);
+      backdrop-filter: blur(8px);
+      border-radius: 10px;
+      padding: 10px 16px;
+      color: #e0e0e0;
+      font-size: 14px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      box-shadow: 0 4px 24px rgba(0,0,0,0.3);
+    }
+    #slab-clip input[type="range"] { width: 220px; }
+    #slab-clip .slab-label { color: #aaa; text-transform: uppercase; letter-spacing: 0.5px; font-size: 12px; }
+    #slab-clip button {
+      width: auto;
+      padding: 4px 10px;
+      font-size: 13px;
+      margin-top: 0;
+    }
+    #slab-clip button.active {
+      background: rgba(80, 140, 255, 0.6);
+      border-color: rgba(80, 140, 255, 0.8);
+    }
+
     /* FPS counter */
     #fps-counter {
       position: absolute;
@@ -244,8 +274,8 @@
         </div>
 
         <div class="control-group" id="molecule-count-group" style="display:none;">
-          <label>Molecule Count: <span id="molecule-count-value">50</span></label>
-          <input type="range" id="molecule-count-slider" min="10" max="200" value="50" step="10" />
+          <label>Molecule Count: <span id="molecule-count-value">64</span></label>
+          <input type="range" id="molecule-count-slider" min="0" max="5" value="1" step="1" />
         </div>
 
         <div class="control-group" id="temp-group" style="display:none;">
@@ -285,9 +315,18 @@
           <div class="toggle-row">
             <button class="toggle-btn active" id="toggle-sim-play">Play</button>
             <button class="toggle-btn" id="toggle-network">Network</button>
+            <button class="toggle-btn" id="toggle-barostat" title="When on, the box expands or contracts to maintain the target pressure. Off means the box is fixed (constant volume).">Barostat</button>
           </div>
+          <div class="toggle-row" style="margin-top: 4px;">
+            <button class="toggle-btn active" id="toggle-periodic" title="Solid walls contain molecules. Turn off to let molecules wrap around edges (periodic/infinite box).">Solid Walls</button>
+          </div>
+          <label style="margin-top: 8px;">Box Size: <span id="box-size-value">60</span> Å</label>
+          <input type="range" id="box-size-slider" min="15" max="150" step="1" value="60">
           <label style="margin-top: 8px;">Speed: <span id="sim-speed-value">1</span>x</label>
           <input type="range" id="sim-speed-slider" min="1" max="20" step="1" value="1">
+          <label style="margin-top: 8px;">Target Pressure: <span id="pressure-target-value">1</span> bar</label>
+          <input type="range" id="pressure-target-slider" min="0.1" max="50" step="0.1" value="1">
+          <button id="add-salt-btn" style="margin-top: 8px;">Add Salt Crystal</button>
         </div>
       </div>
 
@@ -311,8 +350,28 @@
           <span id="sim-nn-dist">--</span>
         </div>
         <div>
+          <span class="energy-label">Pressure: </span>
+          <span id="sim-pressure">--</span>
+        </div>
+        <div>
+          <span class="energy-label">Box Size: </span>
+          <span id="sim-box-size">--</span>
+        </div>
+        <div>
           <span class="energy-label">Step: </span>
           <span id="sim-step">0</span>
+        </div>
+        <!-- Graph toggle -->
+        <div style="margin-top: 8px;">
+          <button id="toggle-graph" class="control-btn" style="font-size: 11px; padding: 4px 8px;">Show Graph</button>
+        </div>
+        <!-- Real-time graph (hidden by default) -->
+        <div id="graph-container" style="margin-top: 8px; display: none;">
+          <canvas id="stats-graph" width="280" height="120"></canvas>
+          <div style="font-size: 11px; color: #aaa;">
+            <span style="color: #4f8;">■</span> Box Size (Å) |
+            <span style="color: #f84;">■</span> NN Dist (Å)
+          </div>
         </div>
       </div>
 
@@ -342,6 +401,13 @@
           <p id="experiment-prompt-text" style="margin:0; flex:1;"></p>
           <button id="close-experiment-prompt" style="background:none; border:none; color:#888; cursor:pointer; font-size: 22px; padding:0 0 0 12px; min-width:auto; width:auto;">&times;</button>
         </div>
+      </div>
+
+      <div id="slab-clip">
+        <button id="slab-toggle" title="Enable depth clipping to see through dense clusters">Depth Clip</button>
+        <span class="slab-label">Slab:</span>
+        <input type="range" id="slab-slider" min="1" max="80" step="0.2" value="20" disabled />
+        <span id="slab-value" style="min-width: 42px; text-align: right;">20 Å</span>
       </div>
 
       <button id="vr-button">Enter VR</button>

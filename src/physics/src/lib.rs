@@ -40,6 +40,17 @@ pub struct Atom {
     pub element: String,
 }
 
+/// Virtual site (massless charge point, e.g., TIP4P M site)
+/// Position is computed each frame from reference atoms.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VirtualSite {
+    pub charge: f64,      // partial charge
+    /// Indices of atoms used to compute position (e.g., [O_idx, H1_idx, H2_idx])
+    pub ref_atoms: Vec<usize>,
+    /// Type of virtual site: "tip4p" for water M site
+    pub site_type: String,
+}
+
 /// A molecule: a collection of atoms with a center of mass and orientation.
 ///
 /// World-frame atom positions in `atoms` are derived from body-frame positions
@@ -69,6 +80,9 @@ pub struct Molecule {
     /// Diagonal moments of inertia in the body frame (amu * Angstrom^2).
     #[serde(default)]
     pub inertia: (f64, f64, f64),
+    /// Virtual sites (massless charge points like TIP4P M site)
+    #[serde(default)]
+    pub virtual_sites: Vec<VirtualSite>,
 }
 
 fn identity_quat() -> (f64, f64, f64, f64) { (1.0, 0.0, 0.0, 0.0) }
@@ -126,6 +140,41 @@ impl Molecule {
         self.q = identity_quat();
         self.omega_body = (0.0, 0.0, 0.0);
     }
+}
+
+/// Compute the world position of a TIP4P-style M site.
+/// ref_atoms should be [O_idx, H1_idx, H2_idx].
+/// The M site is on the bisector of H-O-H, at distance d from O,
+/// where d = 0.1546 Angstroms for TIP4P/2005.
+pub fn compute_tip4p_m_site(atoms: &[Atom], ref_atoms: &[usize]) -> (f64, f64, f64) {
+    let o_idx = ref_atoms[0];
+    let h1_idx = ref_atoms[1];
+    let h2_idx = ref_atoms[2];
+
+    let o = &atoms[o_idx];
+    let h1 = &atoms[h1_idx];
+    let h2 = &atoms[h2_idx];
+
+    // TIP4P/2005: distance from O to M site
+    const D_OM: f64 = 0.1546;
+
+    // Vector from O to midpoint of H-H
+    let h_mid_x = (h1.x + h2.x) / 2.0;
+    let h_mid_y = (h1.y + h2.y) / 2.0;
+    let h_mid_z = (h1.z + h2.z) / 2.0;
+
+    let dir_x = h_mid_x - o.x;
+    let dir_y = h_mid_y - o.y;
+    let dir_z = h_mid_z - o.z;
+
+    let dist = (dir_x * dir_x + dir_y * dir_y + dir_z * dir_z).sqrt();
+    if dist < 1e-10 {
+        return (o.x, o.y, o.z);
+    }
+
+    // M site is at O + (direction * D_OM / dist)
+    let scale = D_OM / dist;
+    (o.x + dir_x * scale, o.y + dir_y * scale, o.z + dir_z * scale)
 }
 
 /// Result of an interaction energy calculation

@@ -13,6 +13,14 @@ export const LJ_PARAMS: Record<string, { epsilon: number; sigma: number }> = {
   F:  { epsilon: 0.2552, sigma: 2.95 },
   S:  { epsilon: 1.0460, sigma: 3.55 },
   Cl: { epsilon: 1.1088, sigma: 3.47 },
+  Na: { epsilon: 0.4577, sigma: 2.80 }, // Approximate for Na+
+};
+
+// Ionic radii for charged species (Angstroms) - used for rendering ions
+// Na+ contracts to ~1.02 Å, Cl- expands to ~1.81 Å
+export const IONIC_RADII: Record<string, number> = {
+  Na: 1.02,  // Na+ ionic radius (smaller than oxygen)
+  Cl: 1.81,  // Cl- ionic radius (larger than oxygen)
 };
 
 // Van der Waals radii (Angstroms) for rendering
@@ -23,7 +31,8 @@ export const VDW_RADII: Record<string, number> = {
   O:  1.52,
   F:  1.47,
   S:  1.80,
-  Cl: 1.75,
+  Cl: 1.75, // Neutral chlorine (use IONIC_RADII for Cl-)
+  Na: 2.27, // Neutral sodium (use IONIC_RADII for Na+)
 };
 
 // Covalent radii (Angstroms) for ball-and-stick rendering
@@ -35,6 +44,7 @@ export const COVALENT_RADII: Record<string, number> = {
   F:  0.57,
   S:  1.05,
   Cl: 1.02,
+  Na: 1.54, // Metallic sodium (not used for ions)
 };
 
 // Element colors (CPK coloring scheme)
@@ -46,6 +56,7 @@ export const ELEMENT_COLORS: Record<string, number> = {
   F:  0x90e050,
   S:  0xffff30,
   Cl: 0x1ff01f,
+  Na: 0xab5cf2, // Purple/violet for sodium
 };
 
 // Electrostatic potential color scheme (matching MolCalc)

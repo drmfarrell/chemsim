@@ -1,6 +1,6 @@
 use wasm_bindgen::prelude::*;
 use serde::{Deserialize, Serialize};
-use crate::{Atom, Molecule, InteractionResult};
+use crate::{Atom, Molecule, InteractionResult, VirtualSite};
 use crate::coulomb::{coulomb_energy, coulomb_force, electric_field_at};
 use crate::lennard_jones::{lj_energy, lj_force};
 use crate::integrator::{verlet_position_step, verlet_velocity_step, kinetic_energy, compute_temperature};
@@ -13,6 +13,15 @@ use crate::rotation::integrate_rotation;
 struct MoleculeInput {
     atoms: Vec<AtomInput>,
     polarizability: f64,
+    #[serde(default)]
+    virtual_sites: Vec<VirtualSiteInput>,
+}
+
+#[derive(Deserialize)]
+struct VirtualSiteInput {
+    charge: f64,
+    ref_atoms: Vec<usize>,
+    site_type: String,
 }
 
 #[derive(Deserialize)]
@@ -27,6 +36,10 @@ struct AtomInput {
     mass: f64,
 }
 
+/// Conversion: 1 bar = 1e5 Pa, 1 kJ/(mol*A^3) = 1.66054e9 Pa -> 16605.4 bar.
+/// Hence pressure in bar = pressure in kJ/(mol*A^3) * BAR_PER_KJ_MOL_A3.
+const BAR_PER_KJ_MOL_A3: f64 = 16605.39;
+
 /// The main simulation system exposed to JavaScript
 #[wasm_bindgen]
 pub struct SimulationSystem {
@@ -40,6 +53,14 @@ pub struct SimulationSystem {
     cutoff: f64,           // interaction cutoff in Angstroms
     forces: Vec<(f64, f64, f64)>,
     step_count: u64,
+
+    // Barostat state (Berendsen-style isotropic pressure coupling).
+    use_barostat: bool,
+    target_pressure_bar: f64,
+    barostat_coupling: f64,   // unitless; blends dt*kappa/tau_P into one knob
+    last_virial: f64,          // last scalar virial (sum over pairs of r . F)
+    last_pressure_bar: f64,    // cached for UI readout
+    smoothed_pressure_bar: f64, // exponentially averaged pressure for barostat feedback
 }
 
 #[wasm_bindgen]
@@ -57,6 +78,17 @@ impl SimulationSystem {
             cutoff: 12.0,
             forces: Vec::new(),
             step_count: 0,
+
+            use_barostat: false,
+            target_pressure_bar: 1.0,
+            // Effective kappa/tau_P for barostat. The barostat responds to
+            // pressure differences to maintain target pressure. Value must
+            // account for pressure being in kJ/(mol*Å³) where 1 bar = 1/16661.
+            // With timestep of 0.002, this gives ~0.1% response per 100 bar difference.
+            barostat_coupling: 1000.0,  // Calibrated for kJ/(mol*Å³) with timestep
+            last_virial: 0.0,
+            last_pressure_bar: 0.0,
+            smoothed_pressure_bar: 1.0,  // Start at target to avoid initial spike
         }
     }
 
@@ -76,6 +108,12 @@ impl SimulationSystem {
             element: a.element,
         }).collect();
 
+        let virtual_sites: Vec<VirtualSite> = input.virtual_sites.into_iter().map(|vs| VirtualSite {
+            charge: vs.charge,
+            ref_atoms: vs.ref_atoms,
+            site_type: vs.site_type,
+        }).collect();
+
         let mut mol = Molecule {
             atoms,
             center_x: 0.0,
@@ -89,6 +127,7 @@ impl SimulationSystem {
             q: (1.0, 0.0, 0.0, 0.0),
             omega_body: (0.0, 0.0, 0.0),
             inertia: (1.0, 1.0, 1.0),
+            virtual_sites,
         };
         mol.compute_center();
         mol.init_rigid_body();
@@ -104,6 +143,14 @@ impl SimulationSystem {
         self.molecules.clear();
         self.forces.clear();
         self.step_count = 0;
+    }
+
+    /// Remove the last molecule from the system (for adding salt)
+    pub fn remove_last_molecule(&mut self) {
+        if !self.molecules.is_empty() {
+            self.molecules.pop();
+            self.forces.pop();
+        }
     }
 
     /// Set the position of a specific molecule (for drag interaction)
@@ -199,6 +246,49 @@ impl SimulationSystem {
         let mut fy = 0.0;
         let mut fz = 0.0;
 
+        // Compute virtual site positions for both molecules
+        let mut a_virt_sites: Vec<(f64, f64, f64, f64)> = Vec::new(); // (x, y, z, charge)
+        let mut b_virt_sites: Vec<(f64, f64, f64, f64)> = Vec::new();
+
+        for vs in &mol_a.virtual_sites {
+            if vs.site_type == "tip4p" {
+                let (x, y, z) = crate::compute_tip4p_m_site(&mol_a.atoms, &vs.ref_atoms);
+                a_virt_sites.push((x, y, z, vs.charge));
+            }
+        }
+
+        for vs in &mol_b.virtual_sites {
+            if vs.site_type == "tip4p" {
+                let (x, y, z) = crate::compute_tip4p_m_site(&mol_b.atoms, &vs.ref_atoms);
+                b_virt_sites.push((x, y, z, vs.charge));
+            }
+        }
+
+        // Helper for Coulomb energy between charge sites
+        let coulomb_energy_site = |ax: f64, ay: f64, az: f64, qa: f64,
+                                     bx: f64, by: f64, bz: f64, qb: f64| -> f64 {
+            let dx = bx - ax;
+            let dy = by - ay;
+            let dz = bz - az;
+            let r2 = dx * dx + dy * dy + dz * dz;
+            if r2 < 0.01 { return 0.0; }
+            let r = r2.sqrt();
+            crate::COULOMB_K * qa * qb / r
+        };
+
+        // Helper for Coulomb force between charge sites
+        let coulomb_force_site = |ax: f64, ay: f64, az: f64, qa: f64,
+                                     bx: f64, by: f64, bz: f64, qb: f64| -> (f64, f64, f64) {
+            let dx = bx - ax;
+            let dy = by - ay;
+            let dz = bz - az;
+            let r2 = dx * dx + dy * dy + dz * dz;
+            if r2 < 0.01 { return (0.0, 0.0, 0.0); }
+            let r = r2.sqrt();
+            let f_scale = -crate::COULOMB_K * qa * qb / (r * r2);
+            (f_scale * dx, f_scale * dy, f_scale * dz)
+        };
+
         // Sum pairwise interactions between all atoms of A and B
         for a_atom in &mol_a.atoms {
             for b_atom in &mol_b.atoms {
@@ -210,6 +300,35 @@ impl SimulationSystem {
                 fx += cfx + lfx;
                 fy += cfy + lfy;
                 fz += cfz + lfz;
+            }
+
+            // A atoms with B virtual sites (Coulomb only)
+            for &(vx, vy, vz, vq) in &b_virt_sites {
+                e_coulomb += coulomb_energy_site(a_atom.x, a_atom.y, a_atom.z, a_atom.charge, vx, vy, vz, vq);
+                let (cfx, cfy, cfz) = coulomb_force_site(a_atom.x, a_atom.y, a_atom.z, a_atom.charge, vx, vy, vz, vq);
+                fx += cfx;
+                fy += cfy;
+                fz += cfz;
+            }
+        }
+
+        // A virtual sites with B atoms (Coulomb only)
+        for &(vx, vy, vz, vq) in &a_virt_sites {
+            for b_atom in &mol_b.atoms {
+                e_coulomb += coulomb_energy_site(vx, vy, vz, vq, b_atom.x, b_atom.y, b_atom.z, b_atom.charge);
+                let (cfx, cfy, cfz) = coulomb_force_site(vx, vy, vz, vq, b_atom.x, b_atom.y, b_atom.z, b_atom.charge);
+                fx += cfx;
+                fy += cfy;
+                fz += cfz;
+            }
+
+            // Virtual site - virtual site interactions
+            for &(bx, by, bz, bq) in &b_virt_sites {
+                e_coulomb += coulomb_energy_site(vx, vy, vz, vq, bx, by, bz, bq);
+                let (cfx, cfy, cfz) = coulomb_force_site(vx, vy, vz, vq, bx, by, bz, bq);
+                fx += cfx;
+                fy += cfy;
+                fz += cfz;
             }
         }
 
@@ -267,6 +386,16 @@ impl SimulationSystem {
     pub fn get_kinetic_energy(&self) -> f64 { kinetic_energy(&self.molecules) }
     pub fn get_molecule_count(&self) -> usize { self.molecules.len() }
     pub fn get_step_count(&self) -> u64 { self.step_count }
+
+    /// Barostat controls and readouts. The barostat only runs when periodic
+    /// boundaries are enabled (it rescales the periodic cell).
+    pub fn set_barostat(&mut self, enabled: bool) { self.use_barostat = enabled; }
+    pub fn set_target_pressure(&mut self, p_bar: f64) { self.target_pressure_bar = p_bar; }
+    pub fn set_barostat_coupling(&mut self, k: f64) { self.barostat_coupling = k; }
+    pub fn get_pressure(&self) -> f64 { self.last_pressure_bar }
+    pub fn get_smoothed_pressure(&self) -> f64 { self.smoothed_pressure_bar }
+    pub fn get_virial(&self) -> f64 { self.last_virial }
+    pub fn get_box_size(&self) -> f64 { self.box_size }
 
     /// Get the total potential energy of the system (sum of all pairwise interactions)
     pub fn get_potential_energy(&self) -> f64 {
@@ -385,25 +514,25 @@ impl SimulationSystem {
         let n = self.molecules.len();
         if n == 0 { return; }
 
-        // Compute forces and torques at current state.
-        let (forces, torques) = self.compute_all_forces();
+        // Compute forces, torques, and virial at current state.
+        let (forces, torques, _virial0) = self.compute_all_forces();
 
         // Velocity Verlet position step for translation.
         let old_accel = verlet_position_step(&mut self.molecules, &forces, self.timestep);
 
-        // Apply periodic boundary conditions to translational state.
+        // Apply boundary conditions to translational state.
         if self.use_periodic {
             self.apply_periodic_boundaries();
+        } else {
+            self.apply_wall_boundaries();
         }
 
         // Semi-implicit Euler step for rotation (rebuilds world atom positions
         // from the updated orientation).
         integrate_rotation(&mut self.molecules, &torques, self.timestep);
 
-        // Compute new forces + torques at updated positions (discard new_torques
-        // because our semi-implicit rotation integrator only needs torque at
-        // the start of the step).
-        let (new_forces, _new_torques) = self.compute_all_forces();
+        // Compute new forces + torques + virial at updated positions.
+        let (new_forces, _new_torques, new_virial) = self.compute_all_forces();
 
         // Velocity Verlet velocity step.
         verlet_velocity_step(&mut self.molecules, &old_accel, &new_forces, self.timestep);
@@ -418,8 +547,103 @@ impl SimulationSystem {
             );
         }
 
+        // Record virial + pressure for UI + barostat consumption. Pressure is
+        // computed from post-thermostat translational KE so it reflects the
+        // rescaled velocities.
+        self.last_virial = new_virial;
+        self.last_pressure_bar = self.compute_pressure_bar();
+
+        // Apply barostat (rescale box + molecule COMs).
+        if self.use_barostat && self.use_periodic {
+            self.apply_barostat();
+        }
+
         self.forces = new_forces;
         self.step_count += 1;
+    }
+
+    /// Current pressure in bar, computed from the translational KE and the
+    /// last pair virial using the virial equation of state:
+    ///   P = (2 * KE_trans + W) / (3 * V).
+    fn compute_pressure_bar(&self) -> f64 {
+        if self.box_size <= 0.0 { return 0.0; }
+        let volume = self.box_size.powi(3);
+        let ke_trans = kinetic_energy(&self.molecules); // kJ/mol, translational only
+        let p_kj = (2.0 * ke_trans + self.last_virial) / (3.0 * volume);
+        p_kj * BAR_PER_KJ_MOL_A3
+    }
+
+    /// Berendsen isotropic barostat: rescale the box and all molecule COMs
+    /// toward the target pressure. Molecule orientations, internal
+    /// coordinates, and velocities are untouched (the box is scaled around
+    /// the origin, which is the periodic cell's center in our convention).
+    ///
+    /// TEMPORARILY DISABLED - the barostat is causing runaway expansion
+    /// Berendsen barostat: rescales box to maintain target pressure.
+    /// For small systems (<200 molecules), uses very conservative coupling
+    /// to prevent statistical noise from causing runaway expansion.
+    fn apply_barostat(&mut self) {
+        let n = self.molecules.len();
+        if n == 0 { return; }
+
+        let p_target_kj = self.target_pressure_bar / BAR_PER_KJ_MOL_A3;
+
+        // Use very conservative coupling for small systems to prevent runaway
+        // Statistical pressure fluctuations scale as 1/sqrt(N), so we need
+        // weaker coupling for smaller N.
+        let coupling = if n < 100 {
+            5.0   // Very weak coupling for small systems
+        } else if n < 200 {
+            20.0  // Moderate coupling
+        } else {
+            100.0 // Stronger coupling for larger systems
+        };
+
+        // Use instant pressure (not smoothed) for faster response in boiling demo
+        // But use asymmetric response: contract faster than expand
+        let p_current_kj = self.last_pressure_bar / BAR_PER_KJ_MOL_A3;
+        let delta_p = p_target_kj - p_current_kj;
+
+        // Asymmetric coupling: contract faster than expand to prevent runaway
+        let effective_coupling = if delta_p > 0.0 {
+            // Pressure too high - contract (box too small)
+            coupling * 2.0
+        } else {
+            // Pressure too low - expand (box too large) - be cautious
+            coupling * 0.5
+        };
+
+        // scale^3 = 1 - coupling * dt * (P_target - P)
+        let raw = 1.0 - effective_coupling * self.timestep * delta_p;
+
+        // Clamp scaling to prevent extreme changes
+        let scale3 = raw.clamp(0.99, 1.01);  // ±1% per step max
+        let mut lambda = scale3.cbrt();
+
+        // Hard cap on box size to prevent runaway expansion
+        const MAX_BOX_SIZE: f64 = 100.0;  // Å
+        let mut new_box_size = self.box_size * lambda;
+        if new_box_size > MAX_BOX_SIZE {
+            // Don't expand beyond max
+            return;
+        }
+
+        // Hard floor on box size to prevent collapse
+        const MIN_BOX_SIZE: f64 = 10.0;  // Å
+        if new_box_size < MIN_BOX_SIZE {
+            new_box_size = MIN_BOX_SIZE;
+            lambda = new_box_size / self.box_size;
+        }
+
+        if (lambda - 1.0).abs() < 1e-12 { return; }
+
+        self.box_size = new_box_size;
+        for mol in &mut self.molecules {
+            let dx = mol.center_x * (lambda - 1.0);
+            let dy = mol.center_y * (lambda - 1.0);
+            let dz = mol.center_z * (lambda - 1.0);
+            mol.translate(dx, dy, dz);
+        }
     }
 
     /// Run multiple steps at once (for performance)
@@ -487,17 +711,18 @@ impl SimulationSystem {
 
 // Private methods
 impl SimulationSystem {
-    fn compute_all_forces(&self) -> (Vec<(f64, f64, f64)>, Vec<(f64, f64, f64)>) {
+    fn compute_all_forces(&self) -> (Vec<(f64, f64, f64)>, Vec<(f64, f64, f64)>, f64) {
         let n = self.molecules.len();
         let mut forces = vec![(0.0, 0.0, 0.0); n];
         let mut torques = vec![(0.0, 0.0, 0.0); n];
+        let mut virial = 0.0;
         let cutoff2 = self.cutoff * self.cutoff;
 
         // Use cell list for large systems (> 30 molecules with periodic boundaries)
         if n > 30 && self.use_periodic {
-            self.compute_forces_cell_list(&mut forces, &mut torques, cutoff2);
+            self.compute_forces_cell_list(&mut forces, &mut torques, &mut virial, cutoff2);
         } else {
-            self.compute_forces_brute(&mut forces, &mut torques, cutoff2);
+            self.compute_forces_brute(&mut forces, &mut torques, &mut virial, cutoff2);
         }
 
         // Cap per-molecule force magnitude to prevent the integrator from
@@ -529,19 +754,20 @@ impl SimulationSystem {
             }
         }
 
-        (forces, torques)
+        (forces, torques, virial)
     }
 
     fn compute_forces_brute(
         &self,
         forces: &mut [(f64, f64, f64)],
         torques: &mut [(f64, f64, f64)],
+        virial: &mut f64,
         cutoff2: f64,
     ) {
         let n = self.molecules.len();
         for i in 0..n {
             for j in (i + 1)..n {
-                self.compute_pair_force(i, j, forces, torques, cutoff2);
+                self.compute_pair_force(i, j, forces, torques, virial, cutoff2);
             }
         }
     }
@@ -550,6 +776,7 @@ impl SimulationSystem {
         &self,
         forces: &mut [(f64, f64, f64)],
         torques: &mut [(f64, f64, f64)],
+        virial: &mut f64,
         cutoff2: f64,
     ) {
         let n = self.molecules.len();
@@ -580,14 +807,21 @@ impl SimulationSystem {
                 for cz in 0..n_cells {
                     let cell_idx = cx * n_cells * n_cells + cy * n_cells + cz;
 
-                    // Check this cell with itself and 13 forward neighbors (half-shell)
+                    // Intra-cell pairs (molecules within the same cell)
+                    let cell = &cells[cell_idx];
+                    for a in 0..cell.len() {
+                        for b in (a + 1)..cell.len() {
+                            self.compute_pair_force(cell[a], cell[b], forces, torques, virial, cutoff2);
+                        }
+                    }
+
+                    // Inter-cell pairs with forward neighbors (half-shell for periodic)
+                    // Only check 13 forward neighbors to avoid double-counting
                     for dcx in 0..=1_i32 {
                         let start_cy = if dcx == 0 { 0 } else { -1_i32 };
                         for dcy in start_cy..=1_i32 {
-                            let start_cz = if dcx == 0 && dcy == 0 { 0 } else { -1_i32 };
+                            let start_cz = if dcx == 0 && dcy == 0 { 1 } else { -1_i32 };
                             for dcz in start_cz..=1_i32 {
-                                if dcx == 0 && dcy == 0 && dcz == 0 { continue; } // skip self-self (handled below)
-
                                 let nx = (cx as i32 + dcx).rem_euclid(n_cells as i32) as usize;
                                 let ny = (cy as i32 + dcy).rem_euclid(n_cells as i32) as usize;
                                 let nz = (cz as i32 + dcz).rem_euclid(n_cells as i32) as usize;
@@ -596,20 +830,10 @@ impl SimulationSystem {
                                 // Compute forces between all pairs in cell_idx and neighbor_idx
                                 for &i in &cells[cell_idx] {
                                     for &j in &cells[neighbor_idx] {
-                                        if i < j {
-                                            self.compute_pair_force(i, j, forces, torques, cutoff2);
-                                        }
+                                        self.compute_pair_force(i, j, forces, torques, virial, cutoff2);
                                     }
                                 }
                             }
-                        }
-                    }
-
-                    // Intra-cell pairs
-                    let cell = &cells[cell_idx];
-                    for a in 0..cell.len() {
-                        for b in (a + 1)..cell.len() {
-                            self.compute_pair_force(cell[a], cell[b], forces, torques, cutoff2);
                         }
                     }
                 }
@@ -623,6 +847,7 @@ impl SimulationSystem {
         j: usize,
         forces: &mut [(f64, f64, f64)],
         torques: &mut [(f64, f64, f64)],
+        virial: &mut f64,
         cutoff2: f64,
     ) {
         let mol_a = &self.molecules[i];
@@ -648,6 +873,51 @@ impl SimulationSystem {
         let img_dy = dy - (mol_b.center_y - mol_a.center_y);
         let img_dz = dz - (mol_b.center_z - mol_a.center_z);
 
+        // Compute virtual site positions for both molecules
+        let mut a_virt_sites: Vec<(f64, f64, f64, f64)> = Vec::new(); // (x, y, z, charge)
+        let mut b_virt_sites: Vec<(f64, f64, f64, f64)> = Vec::new();
+
+        for vs in &mol_a.virtual_sites {
+            if vs.site_type == "tip4p" {
+                let (x, y, z) = crate::compute_tip4p_m_site(&mol_a.atoms, &vs.ref_atoms);
+                a_virt_sites.push((x, y, z, vs.charge));
+            }
+        }
+
+        for vs in &mol_b.virtual_sites {
+            if vs.site_type == "tip4p" {
+                let (x, y, z) = crate::compute_tip4p_m_site(&mol_b.atoms, &vs.ref_atoms);
+                // Shift B's virtual sites by the periodic image offset
+                b_virt_sites.push((x + img_dx, y + img_dy, z + img_dz, vs.charge));
+            }
+        }
+
+        // Helper to compute Coulomb force between a charge site and an atom
+        let coulomb_to_atom = |ax: f64, ay: f64, az: f64, q_a: f64,
+                               bx: f64, by: f64, bz: f64, q_b: f64| -> (f64, f64, f64) {
+            let dx = bx - ax;
+            let dy = by - ay;
+            let dz = bz - az;
+            let r2 = dx * dx + dy * dy + dz * dz;
+            if r2 < 0.01 { return (0.0, 0.0, 0.0); }
+            let r = r2.sqrt();
+            let f_scale = -crate::COULOMB_K * q_a * q_b / (r * r2);
+            (f_scale * dx, f_scale * dy, f_scale * dz)
+        };
+
+        // Helper to compute Coulomb force between two charge sites
+        let coulomb_site_site = |ax: f64, ay: f64, az: f64, q_a: f64,
+                                  bx: f64, by: f64, bz: f64, q_b: f64| -> (f64, f64, f64) {
+            let dx = bx - ax;
+            let dy = by - ay;
+            let dz = bz - az;
+            let r2 = dx * dx + dy * dy + dz * dz;
+            if r2 < 0.01 { return (0.0, 0.0, 0.0); }
+            let r = r2.sqrt();
+            let f_scale = -crate::COULOMB_K * q_a * q_b / (r * r2);
+            (f_scale * dx, f_scale * dy, f_scale * dz)
+        };
+
         for a_atom in &mol_a.atoms {
             // Lever arm for molecule A: atom_a world - center_a
             let rax = a_atom.x - mol_a.center_x;
@@ -658,7 +928,7 @@ impl SimulationSystem {
                 // For cross-cell pair forces under PBC, temporarily shift b_atom
                 // into the same periodic image as a so force calculation uses
                 // the minimum-image distance.
-                let b_img = Atom {
+                let b_img = crate::Atom {
                     x: b_atom.x + img_dx,
                     y: b_atom.y + img_dy,
                     z: b_atom.z + img_dz,
@@ -683,6 +953,15 @@ impl SimulationSystem {
                 forces[j].1 -= fy;
                 forces[j].2 -= fz;
 
+                // Atom-atom virial contribution: r_ab . F_on_a (with r_ab
+                // using the minimum-image position of b). Sums to the scalar
+                // virial W used in the virial equation of state,
+                //   P = (2 KE_trans + W) / (3 V).
+                let rdx = a_atom.x - b_img.x;
+                let rdy = a_atom.y - b_img.y;
+                let rdz = a_atom.z - b_img.z;
+                *virial += rdx * fx + rdy * fy + rdz * fz;
+
                 // Torque on A: r_a x F
                 torques[i].0 += ray * fz - raz * fy;
                 torques[i].1 += raz * fx - rax * fz;
@@ -696,6 +975,86 @@ impl SimulationSystem {
                 torques[j].0 += rby * (-fz) - rbz * (-fy);
                 torques[j].1 += rbz * (-fx) - rbx * (-fz);
                 torques[j].2 += rbx * (-fy) - rby * (-fx);
+            }
+
+            // A atom interacting with B's virtual sites (Coulomb only)
+            for &(vx, vy, vz, vq) in &b_virt_sites {
+                let (fx, fy, fz) = coulomb_to_atom(a_atom.x, a_atom.y, a_atom.z, a_atom.charge, vx, vy, vz, vq);
+
+                forces[i].0 += fx;
+                forces[i].1 += fy;
+                forces[i].2 += fz;
+                forces[j].0 -= fx;
+                forces[j].1 -= fy;
+                forces[j].2 -= fz;
+
+                let rdx = a_atom.x - vx;
+                let rdy = a_atom.y - vy;
+                let rdz = a_atom.z - vz;
+                *virial += rdx * fx + rdy * fy + rdz * fz;
+
+                torques[i].0 += ray * fz - raz * fy;
+                torques[i].1 += raz * fx - rax * fz;
+                torques[i].2 += rax * fy - ray * fx;
+                // Torque on B from virtual site: virtual site has no lever arm (at molecular center)
+                // so no torque contribution
+            }
+        }
+
+        // A's virtual sites interacting with B's atoms
+        for &(vx, vy, vz, vq) in &a_virt_sites {
+            for b_atom in &mol_b.atoms {
+                // Lever arm for virtual site (assumed at molecular center)
+                let rax = 0.0;
+                let ray = 0.0;
+                let raz = 0.0;
+
+                let b_img_x = b_atom.x + img_dx;
+                let b_img_y = b_atom.y + img_dy;
+                let b_img_z = b_atom.z + img_dz;
+
+                let dx = b_img_x - vx;
+                let dy = b_img_y - vy;
+                let dz = b_img_z - vz;
+                let r2 = dx * dx + dy * dy + dz * dz;
+                if r2 < 0.01 { continue; }
+                let r = r2.sqrt();
+                let f_scale = -crate::COULOMB_K * vq * b_atom.charge / (r * r2);
+                let fx = f_scale * dx;
+                let fy = f_scale * dy;
+                let fz = f_scale * dz;
+
+                forces[i].0 += fx;
+                forces[i].1 += fy;
+                forces[i].2 += fz;
+                forces[j].0 -= fx;
+                forces[j].1 -= fy;
+                forces[j].2 -= fz;
+
+                *virial += (vx - b_img_x) * fx + (vy - b_img_y) * fy + (vz - b_img_z) * fz;
+                // No torque on A (virtual site at center)
+                // Torque on B
+                let rbx = b_atom.x - mol_b.center_x;
+                let rby = b_atom.y - mol_b.center_y;
+                let rbz = b_atom.z - mol_b.center_z;
+                torques[j].0 += rby * (-fz) - rbz * (-fy);
+                torques[j].1 += rbz * (-fx) - rbx * (-fz);
+                torques[j].2 += rbx * (-fy) - rby * (-fx);
+            }
+
+            // Virtual site - virtual site interactions
+            for &(bx, by, bz, bq) in &b_virt_sites {
+                let (fx, fy, fz) = coulomb_site_site(vx, vy, vz, vq, bx, by, bz, bq);
+
+                forces[i].0 += fx;
+                forces[i].1 += fy;
+                forces[i].2 += fz;
+                forces[j].0 -= fx;
+                forces[j].1 -= fy;
+                forces[j].2 -= fz;
+
+                *virial += (vx - bx) * fx + (vy - by) * fy + (vz - bz) * fz;
+                // No torque contribution (virtual sites at molecular centers)
             }
         }
     }
@@ -717,6 +1076,40 @@ impl SimulationSystem {
                 mol.translate(0.0, 0.0, -self.box_size);
             } else if mol.center_z < -half {
                 mol.translate(0.0, 0.0, self.box_size);
+            }
+        }
+    }
+
+    fn apply_wall_boundaries(&mut self) {
+        let half = self.box_size / 2.0;
+        // Account for molecular radius when bouncing (approximate as 2 Å)
+        let mol_radius = 2.0;
+        let effective_half = half - mol_radius;
+
+        for mol in &mut self.molecules {
+            // Bounce off walls and reflect velocity
+            if mol.center_x > effective_half {
+                mol.center_x = effective_half;
+                mol.vx = -mol.vx * 0.9; // Lose some energy on bounce
+            } else if mol.center_x < -effective_half {
+                mol.center_x = -effective_half;
+                mol.vx = -mol.vx * 0.9;
+            }
+
+            if mol.center_y > effective_half {
+                mol.center_y = effective_half;
+                mol.vy = -mol.vy * 0.9;
+            } else if mol.center_y < -effective_half {
+                mol.center_y = -effective_half;
+                mol.vy = -mol.vy * 0.9;
+            }
+
+            if mol.center_z > effective_half {
+                mol.center_z = effective_half;
+                mol.vz = -mol.vz * 0.9;
+            } else if mol.center_z < -effective_half {
+                mol.center_z = -effective_half;
+                mol.vz = -mol.vz * 0.9;
             }
         }
     }

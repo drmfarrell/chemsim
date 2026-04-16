@@ -95,7 +95,7 @@ pub fn compute_cloud_deformation_flat(
         let scale = polarizability * deformation_scale * response_factor;
 
         let mag = (ex * ex + ey * ey + ez * ez).sqrt();
-        let max_displacement = 0.5;
+        let max_displacement = 0.4;  // Balance between smoothness and visibility
         let effective_scale = if mag * scale.abs() > max_displacement && mag > 1e-10 {
             max_displacement / mag * scale.signum()
         } else {

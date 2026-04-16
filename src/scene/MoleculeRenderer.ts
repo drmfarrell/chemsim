@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { MoleculeData, AtomData } from '../utils/loader';
 import {
   ELEMENT_COLORS, BALL_RADIUS_SCALE, STICK_RADIUS,
-  CLOUD_OPACITY, VDW_RADII,
+  CLOUD_OPACITY, VDW_RADII, IONIC_RADII,
   ESP_COLOR_NEGATIVE, ESP_COLOR_NEUTRAL, ESP_COLOR_POSITIVE,
   ANGSTROM_TO_SCENE,
 } from '../utils/constants';
@@ -51,7 +51,7 @@ export class MoleculeRenderer {
       });
 
       const mesh = new THREE.Mesh(MoleculeRenderer.sphereGeo!, material);
-      const radius = BALL_RADIUS_SCALE * (VDW_RADII[atom.element] ?? 1.5) * ANGSTROM_TO_SCENE;
+      const radius = BALL_RADIUS_SCALE * this.getAtomRadius(atom) * ANGSTROM_TO_SCENE;
       mesh.scale.setScalar(radius);
       mesh.position.set(
         atom.x * ANGSTROM_TO_SCENE,
@@ -106,6 +106,14 @@ export class MoleculeRenderer {
       this.bondMeshes.push(mesh);
       this.group.add(mesh);
     }
+  }
+
+  private getAtomRadius(atom: AtomData): number {
+    // Use ionic radius for charged atoms (ions), VDW radius for neutral atoms
+    if (Math.abs(atom.charge) > 0.1 && IONIC_RADII[atom.element]) {
+      return IONIC_RADII[atom.element];
+    }
+    return VDW_RADII[atom.element] ?? 1.5;
   }
 
   private buildCloud(): void {
@@ -215,17 +223,19 @@ export class MoleculeRenderer {
       raw[i] = i < deformations.length ? deformations[i] * ANGSTROM_TO_SCENE : 0;
     }
 
-    // Laplacian smooth the deformation field (2 passes) to eliminate spikes.
-    // Each vertex's displacement is averaged with its mesh neighbors.
+    // Laplacian smooth the deformation field to eliminate jagged artifacts.
+    // Uses more passes and stronger neighbor blending to hide discontinuities
+    // between regions deformed by different nearby atoms.
     const smoothed = new Float32Array(raw);
     if (this.adjacency) {
-      for (let pass = 0; pass < 2; pass++) {
+      // 5 smoothing passes with 70% neighbor influence for smooth transitions
+      for (let pass = 0; pass < 5; pass++) {
         const src = pass === 0 ? raw : smoothed;
         const dst = smoothed;
         for (let v = 0; v < nVerts; v++) {
           const neighbors = this.adjacency.get(v);
           if (!neighbors || neighbors.size === 0) continue;
-          // Blend: 50% self + 50% average of neighbors
+          // Blend: 30% self + 70% average of neighbors (stronger smoothing)
           let nx = 0, ny = 0, nz = 0;
           for (const nb of neighbors) {
             nx += src[nb * 3];
@@ -233,9 +243,9 @@ export class MoleculeRenderer {
             nz += src[nb * 3 + 2];
           }
           const nc = neighbors.size;
-          dst[v * 3]     = src[v * 3]     * 0.5 + (nx / nc) * 0.5;
-          dst[v * 3 + 1] = src[v * 3 + 1] * 0.5 + (ny / nc) * 0.5;
-          dst[v * 3 + 2] = src[v * 3 + 2] * 0.5 + (nz / nc) * 0.5;
+          dst[v * 3]     = src[v * 3]     * 0.3 + (nx / nc) * 0.7;
+          dst[v * 3 + 1] = src[v * 3 + 1] * 0.3 + (ny / nc) * 0.7;
+          dst[v * 3 + 2] = src[v * 3 + 2] * 0.3 + (nz / nc) * 0.7;
         }
       }
     }
@@ -279,15 +289,14 @@ export class MoleculeRenderer {
 
     for (const mesh of this.atomMeshes) {
       mesh.visible = showAtoms;
-      // Space-fill mode: use larger radius
+      const atom = mesh.userData.atom as AtomData;
+      const baseRadius = this.getAtomRadius(atom) * ANGSTROM_TO_SCENE;
+
+      // Space-fill mode: use full radius, ball-stick: scaled down
       if (this.viewMode === 'space-fill') {
-        const atom = mesh.userData.atom as AtomData;
-        const radius = (VDW_RADII[atom.element] ?? 1.5) * ANGSTROM_TO_SCENE;
-        mesh.scale.setScalar(radius);
+        mesh.scale.setScalar(baseRadius);
       } else {
-        const atom = mesh.userData.atom as AtomData;
-        const radius = BALL_RADIUS_SCALE * (VDW_RADII[atom.element] ?? 1.5) * ANGSTROM_TO_SCENE;
-        mesh.scale.setScalar(radius);
+        mesh.scale.setScalar(BALL_RADIUS_SCALE * baseRadius);
       }
     }
 

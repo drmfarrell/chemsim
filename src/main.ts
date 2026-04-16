@@ -10,6 +10,9 @@ import { Tutorial } from './ui/Tutorial';
 import { EXPERIMENTS, Experiment } from './ui/Experiments';
 import init, { SimulationSystem } from './wasm-pkg/chemsim_physics';
 
+// Molecule count presets for box mode (perfect cubes for even grid placement)
+const MOLECULE_COUNT_PRESETS = [8, 27, 64, 125, 216]; // 2³, 3³, 4³, 5³, 6³ - capped for smooth animation
+
 // Application state
 let sceneManager: SceneManager;
 let physics: SimulationSystem;
@@ -36,6 +39,31 @@ let boxMolecules: MoleculeRenderer[] = [];
 let boxMoleculeData: MoleculeData | null = null;
 let boxGroup: THREE.Group | null = null;
 let boxHelper: THREE.LineSegments | null = null;
+// Box side length (in Angstroms) that the boxHelper geometry was built for;
+// used to scale the helper as the barostat changes the physics box.
+let INITIAL_BOX_SIZE_FOR_HELPER = 1;
+
+// Update box appearance based on walls vs periodic
+function updateBoxAppearance(hasWalls: boolean): void {
+  if (!boxHelper) return;
+  const material = boxHelper.material as THREE.LineBasicMaterial;
+  if (hasWalls) {
+    material.color.setHex(0x444466);
+    material.opacity = 0.5;
+    material.transparent = true;
+    material.dashed = false;
+  } else {
+    // Periodic mode: dashed lines to show "no walls"
+    material.color.setHex(0x666688);
+    material.opacity = 0.3;
+    material.transparent = true;
+    material.dashed = true;
+    material.dashSize = 1;
+    material.gapSize = 0.5;
+  }
+  material.needsUpdate = true;
+}
+
 let isSimulationRunning = false;
 let simSpeedMultiplier = 1;
 let showInteractionNetwork = false;
@@ -43,13 +71,18 @@ let networkLines: THREE.LineSegments | null = null;
 let statsUpdateCounter = 0;
 let tutorial: Tutorial;
 
+// Graph data for tracking box size and NN distance over time
+const MAX_GRAPH_POINTS = 200;
+let graphHistory: { boxSize: number; nnDist: number; step: number }[] = [];
+let showGraph = false;
+
 // Incremented on each load; in-flight loads whose token is stale bail out
 // so overlapping load calls cannot both commit and strand meshes in the scene.
 let loadToken = 0;
 
 // Element mass lookup
 const ELEMENT_MASS: Record<string, number> = {
-  H: 1.008, C: 12.011, N: 14.007, O: 15.999, F: 18.998, S: 32.065, Cl: 35.453,
+  H: 1.008, C: 12.011, N: 14.007, O: 15.999, F: 18.998, Na: 22.990, S: 32.065, Cl: 35.453,
 };
 
 async function main() {
@@ -175,20 +208,26 @@ function setupUI(): void {
     physics.set_temperature(parseFloat(tempSlider.value));
   });
 
-  // Molecule count slider
+  // Molecule count slider - uses preset perfect cube values for even grid placement
+  const MOLECULE_COUNT_PRESETS = [8, 27, 64, 125, 216]; // 2³, 3³, 4³, 5³, 6³ - capped for smooth animation
   const countSlider = document.getElementById('molecule-count-slider') as HTMLInputElement;
   const countValue = document.getElementById('molecule-count-value') as HTMLSpanElement;
-  countSlider.addEventListener('input', () => {
-    countValue.textContent = countSlider.value;
-  });
+  const updateCountDisplay = () => {
+    const idx = parseInt(countSlider.value);
+    countValue.textContent = MOLECULE_COUNT_PRESETS[idx].toString();
+  };
+  countSlider.addEventListener('input', updateCountDisplay);
   countSlider.addEventListener('change', () => {
     if (currentMode === 'mode2') {
+      const idx = parseInt(countSlider.value);
       loadMode2(
         (document.getElementById('molecule-a-selector') as HTMLSelectElement).value,
-        parseInt(countSlider.value),
+        MOLECULE_COUNT_PRESETS[idx],
       );
     }
   });
+  // Initialize display
+  updateCountDisplay();
 
   // View mode toggles
   const viewBtns = ['view-ball-stick', 'view-space-fill', 'view-cloud-only'] as const;
@@ -222,6 +261,27 @@ function setupUI(): void {
     interactionViz.setShowForces(btn.classList.contains('active'));
   });
 
+  // Depth-clip slab
+  const slabToggle = document.getElementById('slab-toggle') as HTMLButtonElement;
+  const slabSlider = document.getElementById('slab-slider') as HTMLInputElement;
+  const slabValue = document.getElementById('slab-value') as HTMLSpanElement;
+  const applySlab = () => {
+    const on = slabToggle.classList.contains('active');
+    slabSlider.disabled = !on;
+    sceneManager.setSlabThickness(on ? parseFloat(slabSlider.value) : null);
+  };
+  slabToggle.addEventListener('click', () => {
+    slabToggle.classList.toggle('active');
+    applySlab();
+  });
+  slabSlider.addEventListener('input', () => {
+    const v = parseFloat(slabSlider.value);
+    slabValue.textContent = `${v.toFixed(1)} Å`;
+    if (slabToggle.classList.contains('active')) {
+      sceneManager.setSlabThickness(v);
+    }
+  });
+
   // Snap to optimal
   document.getElementById('snap-optimal')!.addEventListener('click', () => {
     if (currentMode !== 'mode1' || !moleculeB) return;
@@ -242,6 +302,154 @@ function setupUI(): void {
   speedSlider.addEventListener('input', () => {
     simSpeedMultiplier = parseInt(speedSlider.value);
     speedValue.textContent = speedSlider.value;
+  });
+
+  // Mode 2: Barostat toggle + target pressure slider
+  document.getElementById('toggle-barostat')!.addEventListener('click', (e) => {
+    const btn = e.target as HTMLButtonElement;
+    btn.classList.toggle('active');
+    physics.set_barostat(btn.classList.contains('active'));
+  });
+
+  // Mode 2: Periodic boundary toggle (Walls button)
+  document.getElementById('toggle-periodic')!.addEventListener('click', (e) => {
+    const btn = e.target as HTMLButtonElement;
+    btn.classList.toggle('active');
+    const hasWalls = btn.classList.contains('active');  // Active = walls on
+    physics.set_periodic(!hasWalls);  // Periodic is opposite of walls
+    btn.textContent = hasWalls ? 'Solid Walls' : 'No Walls';
+    updateBoxAppearance(hasWalls);
+  });
+
+  // Mode 2: Box size slider
+  const boxSizeSlider = document.getElementById('box-size-slider') as HTMLInputElement;
+  const boxSizeValue = document.getElementById('box-size-value') as HTMLSpanElement;
+  boxSizeSlider.addEventListener('input', () => {
+    const newSize = parseFloat(boxSizeSlider.value);
+    physics.set_box_size(newSize);
+    boxSizeValue.textContent = newSize.toString();
+    if (boxHelper) {
+      boxHelper.scale.setScalar(newSize * ANGSTROM_TO_SCENE / INITIAL_BOX_SIZE_FOR_HELPER);
+    }
+  });
+
+  // Mode 2: Add Salt Crystal button - creates a NaCl crystal that water can dissolve
+  document.getElementById('add-salt-btn')!.addEventListener('click', async () => {
+    if (currentMode !== 'mode2' || !boxMoleculeData || boxMoleculeData.name.toLowerCase() !== 'water') {
+      alert('Please switch to Mode 2 and load a water simulation first.');
+      return;
+    }
+
+    // Load ion data
+    const naData = await loadMolecule('sodium_ion');
+    const clData = await loadMolecule('chloride_ion');
+
+    // NaCl lattice spacing is about 2.82 Å
+    const LATTICE_SPACING = 2.82;
+
+    // Scale crystal size with water count - use more pairs for better visibility
+    const waterCount = boxMolecules.filter(m => m.getData().atoms.length === 3).length;
+    let CRYSTAL_SIZE: number;
+    if (waterCount <= 64) {
+      CRYSTAL_SIZE = 2;  // 2x2x2 = 16 pairs (32 ions) for 64 water
+    } else if (waterCount <= 125) {
+      CRYSTAL_SIZE = 2;  // 2x2x2 for 125 water
+    } else {
+      CRYSTAL_SIZE = 2;  // 2x2x2 for 216 water (can increase if needed)
+    }
+
+    const cloudOn = document.getElementById('toggle-cloud')?.classList.contains('active') ?? true;
+
+    // Place crystal on the side of the water drop so water can "attack" it
+    // Get current box size to position crystal appropriately
+    const boxSize = physics.get_box_size();
+    const crystalOffset = boxSize * 0.15; // Place crystal 15% from center edge
+    const centerX = crystalOffset;
+    const centerY = crystalOffset;
+    const centerZ = crystalOffset;
+
+    let ionCount = 0;
+
+    // Build NaCl crystal lattice (alternating Na+ and Cl-)
+    // Each unit cell has 4 Na and 4 Cl at corners and face centers
+    for (let cx = 0; cx < CRYSTAL_SIZE; cx++) {
+      for (let cy = 0; cy < CRYSTAL_SIZE; cy++) {
+        for (let cz = 0; cz < CRYSTAL_SIZE; cz++) {
+          const offsetX = (cx - CRYSTAL_SIZE / 2 + 0.5) * LATTICE_SPACING * 2;
+          const offsetY = (cy - CRYSTAL_SIZE / 2 + 0.5) * LATTICE_SPACING * 2;
+          const offsetZ = (cz - CRYSTAL_SIZE / 2 + 0.5) * LATTICE_SPACING * 2;
+
+          // Na+ at corners of this unit cell
+          const naPositions = [
+            [0, 0, 0],
+            [LATTICE_SPACING, LATTICE_SPACING, 0],
+            [LATTICE_SPACING, 0, LATTICE_SPACING],
+            [0, LATTICE_SPACING, LATTICE_SPACING],
+          ];
+
+          // Cl- at face centers
+          const clPositions = [
+            [LATTICE_SPACING / 2, LATTICE_SPACING / 2, 0],
+            [LATTICE_SPACING / 2, 0, LATTICE_SPACING / 2],
+            [0, LATTICE_SPACING / 2, LATTICE_SPACING / 2],
+            [LATTICE_SPACING, LATTICE_SPACING / 2, LATTICE_SPACING / 2],
+          ];
+
+          for (const [dx, dy, dz] of naPositions) {
+            const x = centerX + offsetX + dx;
+            const y = centerY + offsetY + dy;
+            const z = centerZ + offsetZ + dz;
+
+            addMoleculeToPhysics(naData, x, y, z);
+            const naRenderer = new MoleculeRenderer(naData);
+            naRenderer.getGroup().position.set(x * ANGSTROM_TO_SCENE, y * ANGSTROM_TO_SCENE, z * ANGSTROM_TO_SCENE);
+            naRenderer.setCloudVisible(cloudOn);
+            sceneManager.scene.add(naRenderer.getGroup());
+            boxMolecules.push(naRenderer);
+            ionCount++;
+          }
+
+          for (const [dx, dy, dz] of clPositions) {
+            const x = centerX + offsetX + dx;
+            const y = centerY + offsetY + dy;
+            const z = centerZ + offsetZ + dz;
+
+            addMoleculeToPhysics(clData, x, y, z);
+            const clRenderer = new MoleculeRenderer(clData);
+            clRenderer.getGroup().position.set(x * ANGSTROM_TO_SCENE, y * ANGSTROM_TO_SCENE, z * ANGSTROM_TO_SCENE);
+            clRenderer.setCloudVisible(cloudOn);
+            sceneManager.scene.add(clRenderer.getGroup());
+            boxMolecules.push(clRenderer);
+            ionCount++;
+          }
+        }
+      }
+    }
+
+    console.log(`Added NaCl crystal with ${ionCount} ions`);
+  });
+
+  // Graph toggle
+  const graphBtn = document.getElementById('toggle-graph') as HTMLButtonElement;
+  const graphContainer = document.getElementById('graph-container') as HTMLDivElement;
+  graphBtn.addEventListener('click', () => {
+    showGraph = !showGraph;
+    if (showGraph) {
+      graphContainer.style.display = 'block';
+      graphBtn.textContent = 'Hide Graph';
+      // Clear history when showing graph
+      graphHistory = [];
+    } else {
+      graphContainer.style.display = 'none';
+      graphBtn.textContent = 'Show Graph';
+    }
+  });
+
+  const pTargetSlider = document.getElementById('pressure-target-slider') as HTMLInputElement;
+  const pTargetValue = document.getElementById('pressure-target-value') as HTMLSpanElement;
+  pTargetSlider.addEventListener('input', () => {
+    pTargetValue.textContent = pTargetSlider.value;
+    physics.set_target_pressure(parseFloat(pTargetSlider.value));
   });
 
   // Mode 2: Interaction network
@@ -339,8 +547,24 @@ function loadExperiment(exp: Experiment): void {
     }
     if (exp.moleculeCount) {
       const countSlider = document.getElementById('molecule-count-slider') as HTMLInputElement;
-      countSlider.value = exp.moleculeCount.toString();
-      document.getElementById('molecule-count-value')!.textContent = exp.moleculeCount.toString();
+      // Find the closest preset value
+      const closestIdx = MOLECULE_COUNT_PRESETS.reduce((bestIdx, val, idx) => {
+        const bestDiff = Math.abs(MOLECULE_COUNT_PRESETS[bestIdx] - exp.moleculeCount!);
+        const currDiff = Math.abs(val - exp.moleculeCount!);
+        return currDiff < bestDiff ? idx : bestIdx;
+      }, 0);
+      countSlider.value = closestIdx.toString();
+      countSlider.dispatchEvent(new Event('input'));
+    }
+
+    // Set barostat state if specified by experiment
+    if (exp.barostat !== undefined) {
+      const barostatBtn = document.getElementById('toggle-barostat') as HTMLButtonElement;
+      if (exp.barostat) {
+        barostatBtn.classList.add('active');
+      } else {
+        barostatBtn.classList.remove('active');
+      }
     }
 
     const selA = document.getElementById('molecule-a-selector') as HTMLSelectElement;
@@ -528,8 +752,21 @@ function updateMode2(_dt: number): void {
   if (isSimulationRunning) {
     // Run physics steps (multiple sub-steps per frame for stability).
     // Speed multiplier lets the user fast-forward equilibration.
-    const stepsPerFrame = 5 * simSpeedMultiplier;
+    // Scale down steps per frame for large systems to maintain performance.
+    const nMol = boxMolecules.length;
+    let baseSteps = 5;
+    if (nMol > 200) baseSteps = 2;
+    if (nMol > 400) baseSteps = 1;
+    const stepsPerFrame = baseSteps * simSpeedMultiplier;
     physics.step_n(stepsPerFrame);
+
+    // Resize the wireframe box to match the current physics box (the
+    // barostat changes box_size each step). Scaling the existing
+    // LineSegments object avoids reallocating edge geometry every frame.
+    if (boxHelper) {
+      const currentBox = physics.get_box_size();
+      boxHelper.scale.setScalar(currentBox * ANGSTROM_TO_SCENE / INITIAL_BOX_SIZE_FOR_HELPER);
+    }
 
     // Update each molecule's group transform from physics. We drive the
     // group's position and quaternion; the atom meshes live in the group's
@@ -568,24 +805,113 @@ function updateMode2Stats(): void {
   const temp = physics.get_temperature();
   const ke = physics.get_kinetic_energy();
   const step = physics.get_step_count();
+  const pressure = physics.get_pressure();
+  const boxSize = physics.get_box_size();
 
   const simTemp = document.getElementById('sim-temperature');
   const simKE = document.getElementById('sim-ke');
   const simStep = document.getElementById('sim-step');
+  const simPressure = document.getElementById('sim-pressure');
+  const simBox = document.getElementById('sim-box-size');
 
   if (simTemp) simTemp.textContent = `${Math.round(temp)} K`;
   if (simKE) simKE.textContent = `${ke.toFixed(1)} kJ/mol`;
   if (simStep) simStep.textContent = step.toString();
+  if (simPressure) simPressure.textContent = `${pressure.toFixed(1)} bar`;
+  if (simBox) simBox.textContent = `${boxSize.toFixed(2)} \u00C5`;
 
-  // Compute PE and NN distance less frequently (expensive)
-  if (statsUpdateCounter % 30 === 0) {
+  // Compute PE and NN distance less frequently (expensive O(N^2))
+  // Scale interval with molecule count to maintain performance
+  let nnDist = 0;
+  const peInterval = Math.max(30, boxMolecules.length / 4);
+  if (statsUpdateCounter % Math.floor(peInterval) === 0) {
     const pe = physics.get_potential_energy();
-    const nnDist = physics.get_avg_nearest_neighbor_distance();
+    nnDist = physics.get_avg_nearest_neighbor_distance();
     const simPE = document.getElementById('sim-pe');
     const simNN = document.getElementById('sim-nn-dist');
     if (simPE) simPE.textContent = `${pe.toFixed(1)} kJ/mol`;
     if (simNN) simNN.textContent = `${nnDist.toFixed(2)} \u00C5`;
+
+    // Add to graph history
+    if (showGraph) {
+      graphHistory.push({ boxSize, nnDist, step });
+      if (graphHistory.length > MAX_GRAPH_POINTS) {
+        graphHistory.shift();
+      }
+      drawGraph();
+    }
   }
+}
+
+function drawGraph(): void {
+  const canvas = document.getElementById('stats-graph') as HTMLCanvasElement;
+  if (!canvas || graphHistory.length < 2) return;
+
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+
+  const width = canvas.width;
+  const height = canvas.height;
+
+  // Clear canvas
+  ctx.fillStyle = '#1a1a2e';
+  ctx.fillRect(0, 0, width, height);
+
+  // Find min/max for scaling
+  const allSizes = graphHistory.map(d => d.boxSize);
+  const allNN = graphHistory.map(d => d.nnDist);
+  const minVal = Math.min(...allSizes, ...allNN) * 0.95;
+  const maxVal = Math.max(...allSizes, ...allNN) * 1.05;
+
+  const padding = 20;
+  const graphWidth = width - padding * 2;
+  const graphHeight = height - padding * 2;
+
+  // Draw grid lines
+  ctx.strokeStyle = '#333';
+  ctx.lineWidth = 1;
+  for (let i = 0; i <= 4; i++) {
+    const y = padding + (graphHeight / 4) * i;
+    ctx.beginPath();
+    ctx.moveTo(padding, y);
+    ctx.lineTo(width - padding, y);
+    ctx.stroke();
+  }
+
+  // Helper to convert value to Y coordinate
+  const toY = (val: number) => height - padding - ((val - minVal) / (maxVal - minVal)) * graphHeight;
+  const toX = (index: number) => padding + (index / (MAX_GRAPH_POINTS - 1)) * graphWidth;
+
+  // Draw box size line (green)
+  ctx.strokeStyle = '#4f8';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  graphHistory.forEach((data, i) => {
+    const x = toX(i);
+    const y = toY(data.boxSize);
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+
+  // Draw NN distance line (red)
+  ctx.strokeStyle = '#f84';
+  ctx.beginPath();
+  graphHistory.forEach((data, i) => {
+    const x = toX(i);
+    const y = toY(data.nnDist);
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+
+  // Draw current values
+  const lastData = graphHistory[graphHistory.length - 1];
+  ctx.fillStyle = '#4f8';
+  ctx.font = '10px monospace';
+  ctx.fillText(`${lastData.boxSize.toFixed(1)}Å`, width - 50, toY(lastData.boxSize) - 5);
+  ctx.fillStyle = '#f84';
+  ctx.fillText(`${lastData.nnDist.toFixed(2)}Å`, width - 50, toY(lastData.nnDist) + 12);
 }
 
 function updateInteractionNetwork(): void {
@@ -685,15 +1011,17 @@ async function loadMode1Pair(nameA: string, nameB: string): Promise<void> {
 
 function addMoleculeToPhysics(data: MoleculeData, cx: number, cy: number, cz: number): void {
   const atoms = data.atoms.map(a => {
-    const ljp = LJ_PARAMS[a.element] ?? { epsilon: 0.5, sigma: 3.0 };
+    // Use molecule-specific LJ params if provided, otherwise fall back to element defaults
+    const epsilon = a.epsilon ?? (LJ_PARAMS[a.element]?.epsilon ?? 0.5);
+    const sigma = a.sigma ?? (LJ_PARAMS[a.element]?.sigma ?? 3.0);
     return {
       element: a.element,
       x: a.x + cx,
       y: a.y + cy,
       z: a.z + cz,
       charge: a.charge,
-      epsilon: ljp.epsilon,
-      sigma: ljp.sigma,
+      epsilon,
+      sigma,
       mass: ELEMENT_MASS[a.element] ?? 12.0,
     };
   });
@@ -701,6 +1029,7 @@ function addMoleculeToPhysics(data: MoleculeData, cx: number, cy: number, cz: nu
   const json = JSON.stringify({
     atoms,
     polarizability: data.polarizability,
+    virtual_sites: data.virtual_sites ?? [],
   });
 
   physics.add_molecule(json);
@@ -726,22 +1055,52 @@ async function loadMode2(moleculeName: string, count: number): Promise<void> {
 
     boxMoleculeData = data;
 
-    // Scale box with molecule count to hold roughly constant density (~4.5 A
-    // spacing, near liquid water). Small counts get a small box so molecules
-    // can actually find each other; larger counts expand the box instead of
-    // packing tighter and blowing up the force calculation.
-    const targetSpacing = 4.5;
-    const boxSize = Math.max(10, targetSpacing * Math.cbrt(count));
+    // Get target temperature BEFORE calculating box size, since water density
+    // depends strongly on temperature (liquid vs ice).
+    const targetTemp = parseFloat((document.getElementById('temp-slider') as HTMLInputElement).value);
+
+    // Calculate the volume needed for the molecules at liquid density
+    // TIP4P/2005 water density varies with temperature:
+    // - 298K (liquid): 0.997 g/cm³ = 0.0334 molecules/Å³
+    // - 273K (ice): 0.92 g/cm³ = 0.0308 molecules/Å³ (~8% less dense)
+    const isWater = data.name.toLowerCase() === 'water';
+    let moleculeVolume: number;
+    if (isWater) {
+      let density: number;
+      if (targetTemp < 273) {
+        density = 0.0312;
+      } else {
+        density = 0.0334;
+      }
+      moleculeVolume = count / density;
+    } else {
+      const targetSpacing = 4.5;
+      moleculeVolume = Math.pow(targetSpacing * Math.cbrt(count), 3);
+    }
+
+    // Make box 2x larger than molecule volume - molecules start as a "drop" in center
+    const dropSize = Math.cbrt(moleculeVolume);
+    const boxSize = dropSize * 2.0;
+
     physics.set_box_size(boxSize);
-    physics.set_periodic(true);
+    physics.set_periodic(false);  // Default to walls (not periodic) - easier to understand
     physics.set_thermostat(true);
-    physics.set_temperature(parseFloat(
-      (document.getElementById('temp-slider') as HTMLInputElement).value
-    ));
+    physics.set_temperature(targetTemp);
+
+    // Barostat: off by default for stable liquid simulation.
+    // User can enable to see boiling/condensation effects.
+    const barostatBtn = document.getElementById('toggle-barostat');
+    let barostatOn = barostatBtn?.classList.contains('active') ?? false;
+    physics.set_barostat(barostatOn);
+    const pTarget = parseFloat(
+      (document.getElementById('pressure-target-slider') as HTMLInputElement).value
+    );
+    physics.set_target_pressure(pTarget);
 
     // Create box visualization
     boxGroup = new THREE.Group();
     const halfBox = (boxSize / 2) * ANGSTROM_TO_SCENE;
+    INITIAL_BOX_SIZE_FOR_HELPER = boxSize;
     const boxGeo = new THREE.BoxGeometry(
       boxSize * ANGSTROM_TO_SCENE,
       boxSize * ANGSTROM_TO_SCENE,
@@ -756,22 +1115,43 @@ async function loadMode2(moleculeName: string, count: number): Promise<void> {
     boxGeo.dispose();
     sceneManager.scene.add(boxHelper);
 
-    // Place molecules on a uniform grid that fits inside the box. Using
-    // ceil(cbrt(count)) positions per axis guarantees count^3 slots so we
-    // never loop past the grid looking for space for a molecule that won't
-    // fit (the old code had an unbounded outer loop that spun forever if
-    // rounding made the grid too small for `count` placements).
+    // Update box size slider to match
+    const boxSizeSlider = document.getElementById('box-size-slider') as HTMLInputElement;
+    const boxSizeValue = document.getElementById('box-size-value') as HTMLSpanElement;
+    boxSizeSlider.value = boxSize.toString();
+    boxSizeValue.textContent = Math.round(boxSize).toString();
+
+    // Update periodic button state (default = Solid Walls, not periodic)
+    const periodicBtn = document.getElementById('toggle-periodic') as HTMLButtonElement;
+    periodicBtn.classList.add('active');
+    periodicBtn.textContent = 'Solid Walls';
+    updateBoxAppearance(true);  // Solid walls appearance
+
+    // Place molecules as a "drop" in the center of the box
+    // Calculate the size needed for the molecules at liquid density
     const perSide = Math.ceil(Math.cbrt(count));
-    const spacing = boxSize / perSide;
+    const spacing = dropSize / perSide;  // Grid spacing within the drop, not the box
+
+    // Add random jitter to break perfect lattice - helps thermalization
+    const jitterFactor = targetTemp < 273 ? 0.03 : 0.15; // 3% for ice, 15% for liquid
+    const jitterAmount = spacing * jitterFactor;
+
+    // Offset to center the drop in the box (drop is centered at 0,0,0)
+    const dropOffset = dropSize / 2;
+
     let placed = 0;
     outer:
     for (let ix = 0; ix < perSide; ix++) {
       for (let iy = 0; iy < perSide; iy++) {
         for (let iz = 0; iz < perSide; iz++) {
           if (placed >= count) break outer;
-          const x = -halfBox / ANGSTROM_TO_SCENE + spacing * (ix + 0.5);
-          const y = -halfBox / ANGSTROM_TO_SCENE + spacing * (iy + 0.5);
-          const z = -halfBox / ANGSTROM_TO_SCENE + spacing * (iz + 0.5);
+          const jitterX = (Math.random() - 0.5) * jitterAmount;
+          const jitterY = (Math.random() - 0.5) * jitterAmount;
+          const jitterZ = (Math.random() - 0.5) * jitterAmount;
+          // Position within the drop (centered at 0,0,0), not the box
+          const x = -dropOffset + spacing * (ix + 0.5) + jitterX;
+          const y = -dropOffset + spacing * (iy + 0.5) + jitterY;
+          const z = -dropOffset + spacing * (iz + 0.5) + jitterZ;
 
           addMoleculeToPhysics(boxMoleculeData, x, y, z);
 
@@ -865,7 +1245,9 @@ function switchMode(mode: 'mode1' | 'mode2'): void {
   } else {
     const selA = document.getElementById('molecule-a-selector') as HTMLSelectElement;
     const countSlider = document.getElementById('molecule-count-slider') as HTMLInputElement;
-    loadMode2(selA.value, parseInt(countSlider.value));
+    const countIdx = parseInt(countSlider.value);
+    const actualCount = MOLECULE_COUNT_PRESETS[countIdx];
+    loadMode2(selA.value, actualCount);
   }
 }
 

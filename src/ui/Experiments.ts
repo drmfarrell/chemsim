@@ -11,6 +11,7 @@ export interface Experiment {
   moleculeB?: string;
   temperature?: number;
   moleculeCount?: number;
+  barostat?: boolean;  // Whether barostat should be enabled (for freezing/boiling demos)
   prompt: string;
 }
 
@@ -54,21 +55,23 @@ export const EXPERIMENTS: Experiment[] = [
   {
     id: 'water-liquid',
     title: 'Water at Room Temperature',
-    description: 'Watch 50 water molecules behave as a liquid',
+    description: 'Watch 64 water molecules behave as a liquid',
     mode: 'mode2',
     moleculeA: 'water',
     temperature: 300,
-    moleculeCount: 50,
+    moleculeCount: 64,
+    barostat: false,
     prompt: 'Watch the water molecules. They cluster together, forming <span class="glossary" title="Short-lived groups of molecules that form and break apart on a timescale of picoseconds. In a liquid, molecules are close enough to interact strongly but have enough thermal energy to keep shuffling partners.">transient groups</span> that constantly rearrange. This is <span class="glossary" title="Molecules stay in contact but flow past each other. There is enough thermal motion to break any single attraction but not enough to escape all attractions at once.">liquid behavior</span>, driven by <span class="glossary" title="A special, directional attraction between a hydrogen attached to an electronegative atom (O, N, or F) and a lone pair on another electronegative atom. Hydrogen bonds are much stronger than ordinary dipole-dipole attractions.">hydrogen bonding</span>. Turn on the "Network" toggle to see which molecules are currently attracting each other.',
   },
   {
     id: 'methane-gas',
     title: 'Methane at Room Temperature',
-    description: 'Watch 50 methane molecules behave as a gas',
+    description: 'Watch 64 methane molecules behave as a gas',
     mode: 'mode2',
     moleculeA: 'methane',
     temperature: 300,
-    moleculeCount: 50,
+    moleculeCount: 64,
+    barostat: false,
     prompt: 'Compare with the water simulation. Methane molecules barely interact, filling the whole box and moving freely. This is <span class="glossary" title="Molecules move independently with enough kinetic energy to overcome any attractions between them. They spread out to fill the available volume.">gas behavior</span>. The weak <span class="glossary" title="Momentary, fluctuation-driven attractions between all molecules, caused by briefly uneven electron distributions. They are the only attraction nonpolar molecules experience, and they grow with molecular size.">London dispersion forces</span> between methane molecules are not strong enough to form a liquid at 300K.',
   },
   {
@@ -78,8 +81,9 @@ export const EXPERIMENTS: Experiment[] = [
     mode: 'mode2',
     moleculeA: 'water',
     temperature: 300,
-    moleculeCount: 50,
-    prompt: 'Start at 300K and slowly increase the temperature using the slider. Around 373K (100 C), the clusters begin to break apart as molecules gain enough <span class="glossary" title="The energy of motion: faster molecules have more kinetic energy. Temperature is a measure of the average kinetic energy, so heating a substance gives its molecules more speed.">kinetic energy</span> to overcome <span class="glossary" title="A special, directional attraction between a hydrogen attached to an electronegative atom (O, N, or F) and a lone pair on another electronegative atom. Hydrogen bonds are what hold liquid water together.">hydrogen bonding</span>. This is <span class="glossary" title="The temperature at which a liquid turns into a gas. It happens when the average kinetic energy of molecules is high enough to break the attractions holding them together.">boiling</span>.',
+    moleculeCount: 64,  // 4³ - good performance with barostat
+    barostat: true,  // Barostat enabled to show box expansion during boiling
+    prompt: 'Start at 300K and slowly increase the temperature using the slider. Around 373K (100 C), the clusters begin to break apart as molecules gain enough <span class="glossary" title="The energy of motion: faster molecules have more kinetic energy. Temperature is a measure of the average kinetic energy, so heating a substance gives its molecules more speed.">kinetic energy</span> to overcome <span class="glossary" title="A special, directional attraction between a hydrogen attached to an electronegative atom (O, N, or F) and a lone pair on another electronegative atom. Hydrogen bonds are what hold liquid water together.">hydrogen bonding</span>. This is <span class="glossary" title="The temperature at which a liquid turns into a gas. It happens when the average kinetic energy of molecules is high enough to break the attractions holding them together.">boiling</span>. Watch molecules break free from clusters as temperature rises!',
   },
   {
     id: 'water-freezing',
@@ -87,9 +91,10 @@ export const EXPERIMENTS: Experiment[] = [
     description: 'Watch water molecules slow down and cluster',
     mode: 'mode2',
     moleculeA: 'water',
-    temperature: 200,
-    moleculeCount: 50,
-    prompt: 'Start at 200K and lower the temperature further. As the molecules lose <span class="glossary" title="The energy of motion. Cooling a substance takes kinetic energy away from its molecules, slowing them down until attractions dominate over motion.">kinetic energy</span>, they settle into more stable arrangements. Below 273K (0 C), the molecules begin to lock into fixed positions. This is the onset of <span class="glossary" title="The temperature at which a liquid turns into a solid. The molecules no longer have enough kinetic energy to break free of their neighbors, so they lock into a fixed arrangement.">freezing</span>.',
+    temperature: 270,
+    moleculeCount: 64,  // 4³ - good performance with barostat
+    barostat: false,  // Barostat disabled due to runaway expansion issue
+    prompt: 'Start at 270K and lower the temperature further. As the molecules lose <span class="glossary" title="The energy of motion. Cooling a substance takes kinetic energy away from its molecules, slowing them down until attractions dominate over motion.">kinetic energy</span>, they settle into more stable arrangements. Below 273K (0 C), the molecules begin to lock into fixed positions. This is the onset of <span class="glossary" title="The temperature at which a liquid turns into a solid. The molecules no longer have enough kinetic energy to break free of their neighbors, so they lock into a fixed arrangement.">freezing</span>.',
   },
 ];
 

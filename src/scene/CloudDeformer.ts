@@ -60,27 +60,25 @@ export class CloudDeformer {
       return;
     }
 
-    // Transform cloud vertices into world coordinates using the molecule
-    // group's current world matrix. This captures both translation and any
-    // rotation the user has applied (in Mode 1) so the electric field is
-    // evaluated at the correct world position for each vertex.
+    // Transform cloud vertices to world coordinates for WASM field calc.
+    // Cloud vertices are in Angstroms relative to the molecule's center.
+    // The group's position represents the molecule's world position, and its
+    // quaternion represents the molecule's orientation.
     const group = renderer.getGroup();
-    group.updateMatrixWorld();
-    const worldMatrix = group.matrixWorld;
+    const groupPos = group.position.clone();
+    const groupQuat = group.quaternion.clone();
+
+    // Transform each local vertex to world coordinates:
+    // world_pos = group_pos + quat * local_vertex * quat^(-1)
     const tmp = new THREE.Vector3();
     const flatVerts: number[] = [];
     for (const v of data.cloud_mesh.vertices) {
-      tmp.set(v[0], v[1], v[2]).applyMatrix4(worldMatrix);
-      // Scene coords are in the same units as physics (ANGSTROM_TO_SCENE = 1)
-      // but divide out explicitly so this keeps working if that ever changes.
-      flatVerts.push(
-        tmp.x / ANGSTROM_TO_SCENE,
-        tmp.y / ANGSTROM_TO_SCENE,
-        tmp.z / ANGSTROM_TO_SCENE,
-      );
+      // Rotate local vertex by group quaternion, then add group position
+      tmp.set(v[0], v[1], v[2]).applyQuaternion(groupQuat).add(groupPos);
+      flatVerts.push(tmp.x, tmp.y, tmp.z);
     }
 
-    // Compute deformation via WASM physics engine (world-frame displacements).
+    // Compute deformation via WASM (returns world-frame displacement vectors)
     const deformations = this.physics.compute_deformation(
       targetMolIdx,
       sourceMolIdx,
@@ -89,15 +87,15 @@ export class CloudDeformer {
       effectiveScale,
     );
 
-    // Rotate world-frame displacements back into the group's local frame so
-    // they can be applied as vertex offsets inside the rotated group without
-    // getting re-rotated by Three.js when it composes the world transform.
-    const worldToLocal = new THREE.Quaternion().copy(group.quaternion).invert();
+    // Rotate world-frame displacements back to local frame for Three.js
+    // For a displacement vector d (a direction, not a point), the inverse rotation is:
+    // local_d = quat^(-1) * world_d
+    const invRot = groupQuat.clone().invert();
     const n = deformations.length / 3;
     const localDeform = new Array<number>(deformations.length);
     for (let i = 0; i < n; i++) {
       tmp.set(deformations[i * 3], deformations[i * 3 + 1], deformations[i * 3 + 2])
-         .applyQuaternion(worldToLocal);
+         .applyQuaternion(invRot);
       localDeform[i * 3] = tmp.x;
       localDeform[i * 3 + 1] = tmp.y;
       localDeform[i * 3 + 2] = tmp.z;
