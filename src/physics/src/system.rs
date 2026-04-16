@@ -892,10 +892,16 @@ impl SimulationSystem {
         }
     }
 
-    /// Parallel cell-list force computation. Same half-shell neighbor pattern
-    /// as the serial version; each rayon chunk accumulates into thread-local
-    /// `Vec`s that are summed in the reduce step, so there are no shared
-    /// mutations inside the parallel loop.
+    /// Parallel cell-list force computation. Strategy:
+    ///   1. Enumerate unique pairs via the serial half-shell cell walk
+    ///      (cheap; O(pairs), no compute per pair).
+    ///   2. Compute each pair's `PairDelta` in parallel with `par_iter`
+    ///      (this is the heavy work — Coulomb + LJ + virtual-site loops).
+    ///   3. Apply the deltas back into `forces`/`torques`/`virial` serially.
+    ///
+    /// Compared to the earlier fold+reduce over cells, this avoids allocating
+    /// an N-sized scratch `Vec` per rayon chunk (the bottleneck that kept CPU
+    /// usage near a single core) and gives finer-grained tasks.
     #[cfg(feature = "parallel")]
     fn compute_forces_cell_list_parallel(
         &self,
@@ -924,66 +930,53 @@ impl SimulationSystem {
             }
         }
 
-        // Reduce-friendly accumulator type.
-        type Acc = (Vec<(f64, f64, f64)>, Vec<(f64, f64, f64)>, f64);
-        let make_acc = || -> Acc {
-            (vec![(0.0, 0.0, 0.0); n], vec![(0.0, 0.0, 0.0); n], 0.0)
-        };
+        // Step 1: enumerate unique (i, j) pairs via 13-direction half-shell.
+        let mut pairs: Vec<(usize, usize)> = Vec::with_capacity(n * 20);
+        for cell_idx in 0..total_cells {
+            let cz = cell_idx % n_cells;
+            let cy = (cell_idx / n_cells) % n_cells;
+            let cx = cell_idx / (n_cells * n_cells);
 
-        let (pf, pt, pv) = (0..total_cells)
-            .into_par_iter()
-            .fold(make_acc, |(mut fs, mut ts, mut v), cell_idx| {
-                let cz = cell_idx % n_cells;
-                let cy = (cell_idx / n_cells) % n_cells;
-                let cx = cell_idx / (n_cells * n_cells);
-
-                // Intra-cell pairs
-                let cell = &cells[cell_idx];
-                for a in 0..cell.len() {
-                    for b in (a + 1)..cell.len() {
-                        if let Some(d) = self.compute_pair_force(cell[a], cell[b], cutoff2) {
-                            apply_pair(&d, cell[a], cell[b], &mut fs, &mut ts, &mut v);
-                        }
-                    }
+            let cell = &cells[cell_idx];
+            for a in 0..cell.len() {
+                for b in (a + 1)..cell.len() {
+                    pairs.push((cell[a], cell[b]));
                 }
-
-                // Forward-neighbor inter-cell pairs (13-direction half-shell).
-                for dcx in 0..=1_i32 {
-                    let start_cy = if dcx == 0 { 0 } else { -1_i32 };
-                    for dcy in start_cy..=1_i32 {
-                        let start_cz = if dcx == 0 && dcy == 0 { 1 } else { -1_i32 };
-                        for dcz in start_cz..=1_i32 {
-                            let nx = (cx as i32 + dcx).rem_euclid(n_cells as i32) as usize;
-                            let ny = (cy as i32 + dcy).rem_euclid(n_cells as i32) as usize;
-                            let nz = (cz as i32 + dcz).rem_euclid(n_cells as i32) as usize;
-                            let neighbor_idx = nx * n_cells * n_cells + ny * n_cells + nz;
-
-                            for &i in &cells[cell_idx] {
-                                for &j in &cells[neighbor_idx] {
-                                    if let Some(d) = self.compute_pair_force(i, j, cutoff2) {
-                                        apply_pair(&d, i, j, &mut fs, &mut ts, &mut v);
-                                    }
-                                }
+            }
+            for dcx in 0..=1_i32 {
+                let start_cy = if dcx == 0 { 0 } else { -1_i32 };
+                for dcy in start_cy..=1_i32 {
+                    let start_cz = if dcx == 0 && dcy == 0 { 1 } else { -1_i32 };
+                    for dcz in start_cz..=1_i32 {
+                        let nx = (cx as i32 + dcx).rem_euclid(n_cells as i32) as usize;
+                        let ny = (cy as i32 + dcy).rem_euclid(n_cells as i32) as usize;
+                        let nz = (cz as i32 + dcz).rem_euclid(n_cells as i32) as usize;
+                        let neighbor_idx = nx * n_cells * n_cells + ny * n_cells + nz;
+                        for &i in &cells[cell_idx] {
+                            for &j in &cells[neighbor_idx] {
+                                pairs.push((i, j));
                             }
                         }
                     }
                 }
-                (fs, ts, v)
-            })
-            .reduce(make_acc, |(mut af, mut at, av), (bf, bt, bv)| {
-                for k in 0..n {
-                    af[k].0 += bf[k].0; af[k].1 += bf[k].1; af[k].2 += bf[k].2;
-                    at[k].0 += bt[k].0; at[k].1 += bt[k].1; at[k].2 += bt[k].2;
-                }
-                (af, at, av + bv)
-            });
-
-        // Merge reduced buffers into caller's outputs.
-        for k in 0..n {
-            forces[k].0 += pf[k].0; forces[k].1 += pf[k].1; forces[k].2 += pf[k].2;
-            torques[k].0 += pt[k].0; torques[k].1 += pt[k].1; torques[k].2 += pt[k].2;
+            }
         }
-        *virial += pv;
+
+        // Step 2: parallel compute. filter_map so pairs beyond the cutoff
+        // contribute nothing. with_min_len keeps work chunks big enough that
+        // rayon's per-chunk overhead stays below the per-pair compute.
+        let deltas: Vec<(usize, usize, PairDelta)> = pairs
+            .par_iter()
+            .with_min_len(16)
+            .filter_map(|&(i, j)| {
+                self.compute_pair_force(i, j, cutoff2).map(|d| (i, j, d))
+            })
+            .collect();
+
+        // Step 3: serial apply (just float adds; tiny compared to Coulomb+LJ).
+        for (i, j, d) in deltas {
+            apply_pair(&d, i, j, forces, torques, virial);
+        }
     }
 
     /// Pure pair-force calculation: returns the forces, torques, and virial
