@@ -106,6 +106,20 @@ async function main() {
     console.warn(`ChemSim: crossOriginIsolated=${coi}, running single-threaded. Ensure COOP/COEP headers reach the browser (service worker cache can strip them).`);
   }
 
+  // Debug hook: lets tests (and humans) bypass the render loop and time
+  // pure physics throughput. Removed in production isn't necessary since
+  // it's read-only; this is how we verify rayon is actually parallelizing.
+  (globalThis as any).__chemsim = {
+    get physics() { return physics; },
+    get boxMolecules() { return boxMolecules; },
+    benchSteps(nSteps: number): { ms: number; stepsPerSec: number; molCount: number } {
+      const t0 = performance.now();
+      physics.step_n(nSteps);
+      const ms = performance.now() - t0;
+      return { ms, stepsPerSec: (nSteps / ms) * 1000, molCount: boxMolecules.length };
+    },
+  };
+
   // Set up Three.js scene
   sceneManager = new SceneManager('canvas-container');
 

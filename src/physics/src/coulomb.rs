@@ -23,23 +23,25 @@ pub fn coulomb_energy(a1: &Atom, a2: &Atom) -> f64 {
 /// F = -dE/dr * r_hat = k * q1 * q2 / r^2 * r_hat
 /// Returns (fx, fy, fz) -- force on a1 due to a2
 pub fn coulomb_force(a1: &Atom, a2: &Atom) -> (f64, f64, f64) {
-    let dx = a2.x - a1.x;
-    let dy = a2.y - a1.y;
-    let dz = a2.z - a1.z;
+    coulomb_force_raw(a1.x, a1.y, a1.z, a1.charge, a2.x, a2.y, a2.z, a2.charge)
+}
+
+/// Raw-coordinate Coulomb force. Same math as `coulomb_force` but avoids
+/// reading through `&Atom`, which matters in the parallel inner loop where
+/// constructing image-shifted `Atom` values allocates a `String` per pair and
+/// contends on the wasm allocator across rayon workers.
+#[inline(always)]
+pub fn coulomb_force_raw(
+    ax: f64, ay: f64, az: f64, aq: f64,
+    bx: f64, by: f64, bz: f64, bq: f64,
+) -> (f64, f64, f64) {
+    let dx = bx - ax;
+    let dy = by - ay;
+    let dz = bz - az;
     let r2 = dx * dx + dy * dy + dz * dz;
     if r2 < 0.01 { return (0.0, 0.0, 0.0); }
     let r = r2.sqrt();
-    // Force magnitude: k * q1 * q2 / r^2
-    // Direction: from a1 toward a2 if attractive (opposite charges), away if repulsive
-    // F = k * q1 * q2 / r^3 * (dx, dy, dz) -- note sign: negative gradient of energy
-    // E = k*q1*q2/r, so dE/dx = -k*q1*q2*dx/r^3
-    // F_x = -dE/dx = k*q1*q2*dx/r^3
-    // Wait: this gives force in direction of dx when q1*q2 > 0 (repulsive) which is wrong.
-    // For like charges (q1*q2 > 0), force should be repulsive (away from each other).
-    // dx points from a1 to a2. Force on a1 from a2:
-    // If same sign: force pushes a1 away from a2, so force is in -dx direction.
-    // F_on_a1 = -k * q1 * q2 / r^3 * (dx, dy, dz)
-    let f_scale = -COULOMB_K * a1.charge * a2.charge / (r * r2);
+    let f_scale = -COULOMB_K * aq * bq / (r * r2);
     (f_scale * dx, f_scale * dy, f_scale * dz)
 }
 

@@ -29,26 +29,33 @@ pub fn lj_energy(a1: &Atom, a2: &Atom) -> f64 {
 /// F = 4 * epsilon * [12 * sigma^12 / r^14 - 6 * sigma^6 / r^8] * (dx, dy, dz)
 /// Returns (fx, fy, fz) on a1 due to a2
 pub fn lj_force(a1: &Atom, a2: &Atom) -> (f64, f64, f64) {
-    let dx = a2.x - a1.x;
-    let dy = a2.y - a1.y;
-    let dz = a2.z - a1.z;
+    lj_force_raw(a1.x, a1.y, a1.z, a1.epsilon, a1.sigma,
+                 a2.x, a2.y, a2.z, a2.epsilon, a2.sigma)
+}
+
+/// Raw-coordinate LJ force. Same math as `lj_force` but takes f64 args so the
+/// parallel force loop doesn't have to synthesise image-shifted `Atom`
+/// structs (which allocates a `String` for the element and serialises rayon
+/// workers on the wasm allocator).
+#[inline(always)]
+pub fn lj_force_raw(
+    ax: f64, ay: f64, az: f64, aeps: f64, asig: f64,
+    bx: f64, by: f64, bz: f64, beps: f64, bsig: f64,
+) -> (f64, f64, f64) {
+    let dx = bx - ax;
+    let dy = by - ay;
+    let dz = bz - az;
     let r2 = dx * dx + dy * dy + dz * dz;
     if r2 < 0.01 { return (0.0, 0.0, 0.0); }
 
-    let sigma = (a1.sigma + a2.sigma) / 2.0;
-    let epsilon = (a1.epsilon * a2.epsilon).sqrt();
+    let sigma = (asig + bsig) / 2.0;
+    let epsilon = (aeps * beps).sqrt();
     if epsilon < 1e-10 { return (0.0, 0.0, 0.0); }
 
     let s2 = sigma * sigma / r2;
     let s6 = s2 * s2 * s2;
     let s12 = s6 * s6;
 
-    // Force magnitude factor (divided by r, so we multiply by dx/r etc.)
-    // F_x = 4*eps * (12*s12 - 6*s6) / r^2 * dx
-    // The direction: at short range (s12 dominates), repulsive (push a1 away from a2)
-    // At long range (s6 dominates), attractive (pull a1 toward a2)
-    // "Away from a2" means force in -dx direction
-    // F_on_a1 = -4*eps * (12*s12 - 6*s6) / r^2 * (dx, dy, dz)
     let f_scale = -4.0 * epsilon * (12.0 * s12 - 6.0 * s6) / r2;
     (f_scale * dx, f_scale * dy, f_scale * dz)
 }

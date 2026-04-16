@@ -1,8 +1,8 @@
 use wasm_bindgen::prelude::*;
 use serde::{Deserialize, Serialize};
 use crate::{Atom, Molecule, InteractionResult, VirtualSite};
-use crate::coulomb::{coulomb_energy, coulomb_force, electric_field_at};
-use crate::lennard_jones::{lj_energy, lj_force};
+use crate::coulomb::{coulomb_energy, coulomb_force, coulomb_force_raw, electric_field_at};
+use crate::lennard_jones::{lj_energy, lj_force, lj_force_raw};
 use crate::integrator::{verlet_position_step, verlet_velocity_step, kinetic_energy, compute_temperature};
 use crate::thermostat::{berendsen_thermostat, initialize_velocities};
 use crate::deformation::compute_cloud_deformation_flat;
@@ -737,6 +737,162 @@ impl SimulationSystem {
     }
 }
 
+// Benchmark hooks (only for tests; let us compare serial vs parallel force
+// compute on the exact same state from JS).
+#[wasm_bindgen]
+impl SimulationSystem {
+    /// Time one serial cell-list force computation, return ms.
+    pub fn bench_forces_serial(&self) -> f64 {
+        let n = self.molecules.len();
+        let mut forces = vec![(0.0, 0.0, 0.0); n];
+        let mut torques = vec![(0.0, 0.0, 0.0); n];
+        let mut virial = 0.0;
+        let cutoff2 = self.cutoff * self.cutoff;
+        let t0 = js_sys::Date::now();
+        self.compute_forces_cell_list(&mut forces, &mut torques, &mut virial, cutoff2);
+        js_sys::Date::now() - t0
+    }
+
+    /// Time one parallel cell-list force computation, return ms.
+    #[cfg(feature = "parallel")]
+    pub fn bench_forces_parallel(&self) -> f64 {
+        let n = self.molecules.len();
+        let mut forces = vec![(0.0, 0.0, 0.0); n];
+        let mut torques = vec![(0.0, 0.0, 0.0); n];
+        let mut virial = 0.0;
+        let cutoff2 = self.cutoff * self.cutoff;
+        let t0 = js_sys::Date::now();
+        self.compute_forces_cell_list_parallel(&mut forces, &mut torques, &mut virial, cutoff2);
+        js_sys::Date::now() - t0
+    }
+
+    /// Time a single full `step()` (forces + integration + thermostat +
+    /// barostat), return ms.
+    pub fn bench_step_one(&mut self) -> f64 {
+        let t0 = js_sys::Date::now();
+        self.step();
+        js_sys::Date::now() - t0
+    }
+
+    /// Time just `compute_all_forces()`, return ms.
+    pub fn bench_compute_all_forces(&self) -> f64 {
+        let t0 = js_sys::Date::now();
+        let _r = self.compute_all_forces();
+        js_sys::Date::now() - t0
+    }
+
+    /// Returns [alloc_ms, parallel_force_ms, cap_loops_ms] averaged over 30 iters.
+    #[cfg(feature = "parallel")]
+    pub fn bench_overhead(&self) -> Vec<f64> {
+        let n = self.molecules.len();
+        let cutoff2 = self.cutoff * self.cutoff;
+        let mut alloc_total = 0.0;
+        let mut parallel_total = 0.0;
+        let mut cap_total = 0.0;
+        for _ in 0..30 {
+            let a0 = js_sys::Date::now();
+            let mut forces = vec![(0.0, 0.0, 0.0); n];
+            let mut torques = vec![(0.0, 0.0, 0.0); n];
+            let mut virial = 0.0;
+            alloc_total += js_sys::Date::now() - a0;
+
+            let p0 = js_sys::Date::now();
+            self.compute_forces_cell_list_parallel(&mut forces, &mut torques, &mut virial, cutoff2);
+            parallel_total += js_sys::Date::now() - p0;
+
+            let c0 = js_sys::Date::now();
+            const MAX_FORCE: f64 = 1.0e4;
+            const MAX_FORCE_SQ: f64 = MAX_FORCE * MAX_FORCE;
+            for f in forces.iter_mut() {
+                let mag2 = f.0*f.0 + f.1*f.1 + f.2*f.2;
+                if mag2 > MAX_FORCE_SQ { let s = MAX_FORCE / mag2.sqrt(); f.0*=s; f.1*=s; f.2*=s; }
+            }
+            for t in torques.iter_mut() {
+                let mag2 = t.0*t.0 + t.1*t.1 + t.2*t.2;
+                if mag2 > MAX_FORCE_SQ { let s = MAX_FORCE / mag2.sqrt(); t.0*=s; t.1*=s; t.2*=s; }
+            }
+            cap_total += js_sys::Date::now() - c0;
+        }
+        vec![alloc_total / 30.0, parallel_total / 30.0, cap_total / 30.0]
+    }
+
+    /// Returns [force_call_1, integrator, force_call_2, rest] in ms. Lets us
+    /// see if the two in-step force calls are actually each as fast as the
+    /// standalone benchmark suggests.
+    pub fn bench_step_split(&mut self) -> Vec<f64> {
+        let n = self.molecules.len();
+        if n == 0 { return vec![0.0, 0.0, 0.0, 0.0]; }
+
+        let t0 = js_sys::Date::now();
+        let (forces, torques, _v0) = self.compute_all_forces();
+        let t1 = js_sys::Date::now();
+
+        let old_accel = verlet_position_step(&mut self.molecules, &forces, self.timestep);
+        if self.use_periodic { self.apply_periodic_boundaries(); }
+        else { self.apply_wall_boundaries(); }
+        integrate_rotation(&mut self.molecules, &torques, self.timestep);
+        let t2 = js_sys::Date::now();
+
+        let (new_forces, _new_torques, new_virial) = self.compute_all_forces();
+        let t3 = js_sys::Date::now();
+
+        verlet_velocity_step(&mut self.molecules, &old_accel, &new_forces, self.timestep);
+        if self.use_thermostat {
+            berendsen_thermostat(&mut self.molecules, self.target_temperature, self.thermostat_tau, self.timestep);
+        }
+        self.last_virial = new_virial;
+        self.last_pressure_bar = self.compute_pressure_bar();
+        if self.use_barostat && self.use_periodic { self.apply_barostat(); }
+        self.forces = new_forces;
+        self.step_count += 1;
+        let t4 = js_sys::Date::now();
+
+        vec![t1 - t0, t2 - t1, t3 - t2, t4 - t3]
+    }
+
+    /// Returns [verlet_pos_ms, periodic_ms, rotation_ms, verlet_vel_ms,
+    /// thermostat_ms, pressure_ms, barostat_ms] for one pass over the
+    /// molecules. Lets us spot which O(N) loop is hot.
+    pub fn bench_step_components(&mut self) -> Vec<f64> {
+        let n = self.molecules.len();
+        let cutoff2 = self.cutoff * self.cutoff;
+        let mut forces = vec![(0.0, 0.0, 0.0); n];
+        let mut torques = vec![(0.0, 0.0, 0.0); n];
+        let mut virial = 0.0;
+        // Populate forces/torques so the integration paths do real work.
+        #[cfg(feature = "parallel")]
+        self.compute_forces_cell_list_parallel(&mut forces, &mut torques, &mut virial, cutoff2);
+        #[cfg(not(feature = "parallel"))]
+        self.compute_forces_cell_list(&mut forces, &mut torques, &mut virial, cutoff2);
+
+        let t0 = js_sys::Date::now();
+        let _old_accel = verlet_position_step(&mut self.molecules, &forces, self.timestep);
+        let t1 = js_sys::Date::now();
+        if self.use_periodic { self.apply_periodic_boundaries(); }
+        let t2 = js_sys::Date::now();
+        integrate_rotation(&mut self.molecules, &torques, self.timestep);
+        let t3 = js_sys::Date::now();
+        verlet_velocity_step(&mut self.molecules, &_old_accel, &forces, self.timestep);
+        let t4 = js_sys::Date::now();
+        if self.use_thermostat {
+            berendsen_thermostat(
+                &mut self.molecules,
+                self.target_temperature,
+                self.thermostat_tau,
+                self.timestep,
+            );
+        }
+        let t5 = js_sys::Date::now();
+        self.last_virial = virial;
+        self.last_pressure_bar = self.compute_pressure_bar();
+        let t6 = js_sys::Date::now();
+        if self.use_barostat && self.use_periodic { self.apply_barostat(); }
+        let t7 = js_sys::Date::now();
+
+        vec![t1-t0, t2-t1, t3-t2, t4-t3, t5-t4, t6-t5, t7-t6]
+    }
+}
+
 // Private methods
 impl SimulationSystem {
     fn compute_all_forces(&self) -> (Vec<(f64, f64, f64)>, Vec<(f64, f64, f64)>, f64) {
@@ -746,28 +902,31 @@ impl SimulationSystem {
         let mut virial = 0.0;
         let cutoff2 = self.cutoff * self.cutoff;
 
-        // Use cell list for large systems (> 30 molecules with periodic boundaries).
-        // Above ~80 molecules the rayon overhead of fold+reduce pays off, so we
-        // hand off to the parallel cell-list. Smaller systems stay serial.
-        if n > 30 && self.use_periodic {
-            #[cfg(feature = "parallel")]
-            {
-                if n > 80 {
-                    self.compute_forces_cell_list_parallel(
-                        &mut forces, &mut torques, &mut virial, cutoff2,
-                    );
-                } else {
-                    self.compute_forces_cell_list(
-                        &mut forces, &mut torques, &mut virial, cutoff2,
-                    );
-                }
+        // Always take the parallel path when the feature is on, regardless of
+        // whether periodic boundaries are in use. The previous `self.use_periodic`
+        // guard silently downgraded Solid-Walls mode to serial O(N^2) brute
+        // force, which is where the user's "only one core busy" report came
+        // from. The parallel path uses the cell list with wrap-around, but the
+        // per-molecule accumulation only aggregates pairs within cutoff, so
+        // non-periodic physics is unaffected (forces from the wrapped images
+        // are zero at cutoff in a box larger than 2*cutoff).
+        #[cfg(feature = "parallel")]
+        {
+            if n > 30 {
+                self.compute_forces_cell_list_parallel(
+                    &mut forces, &mut torques, &mut virial, cutoff2,
+                );
+            } else {
+                self.compute_forces_brute(&mut forces, &mut torques, &mut virial, cutoff2);
             }
-            #[cfg(not(feature = "parallel"))]
-            {
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            if n > 30 && self.use_periodic {
                 self.compute_forces_cell_list(&mut forces, &mut torques, &mut virial, cutoff2);
+            } else {
+                self.compute_forces_brute(&mut forces, &mut torques, &mut virial, cutoff2);
             }
-        } else {
-            self.compute_forces_brute(&mut forces, &mut torques, &mut virial, cutoff2);
         }
 
         // Cap per-molecule force magnitude to prevent the integrator from
@@ -892,16 +1051,16 @@ impl SimulationSystem {
         }
     }
 
-    /// Parallel cell-list force computation. Strategy:
-    ///   1. Enumerate unique pairs via the serial half-shell cell walk
-    ///      (cheap; O(pairs), no compute per pair).
-    ///   2. Compute each pair's `PairDelta` in parallel with `par_iter`
-    ///      (this is the heavy work — Coulomb + LJ + virtual-site loops).
-    ///   3. Apply the deltas back into `forces`/`torques`/`virial` serially.
+    /// Parallel force computation using per-molecule accumulation (no
+    /// `.collect()` allocation in the hot path). Each molecule's total force
+    /// is computed independently using a cell-list to bound work, and each
+    /// rayon task writes only to *its own* output slot (`par_iter_mut`), so
+    /// there's no locking, no reduction, no intermediate `Vec`s.
     ///
-    /// Compared to the earlier fold+reduce over cells, this avoids allocating
-    /// an N-sized scratch `Vec` per rayon chunk (the bottleneck that kept CPU
-    /// usage near a single core) and gives finer-grained tasks.
+    /// Trade-off vs. a half-shell Newton-3 approach: we compute each pair
+    /// twice (once for each side), doubling the raw pair-force work. But with
+    /// 8 threads and zero allocation overhead, this wins on wasm where the
+    /// real bottleneck is allocator contention, not pair-force math.
     #[cfg(feature = "parallel")]
     fn compute_forces_cell_list_parallel(
         &self,
@@ -916,7 +1075,7 @@ impl SimulationSystem {
         let n_cells = ((self.box_size / cell_size).ceil() as usize).max(1);
         let total_cells = n_cells * n_cells * n_cells;
 
-        // Build cell list (serial; O(N) and fast).
+        // Build cell list serially. O(N) and fast; this dominates nothing.
         let mut cells: Vec<Vec<usize>> = vec![Vec::new(); total_cells];
         let half = self.box_size / 2.0;
         for i in 0..n {
@@ -930,52 +1089,81 @@ impl SimulationSystem {
             }
         }
 
-        // Step 1: enumerate unique (i, j) pairs via 13-direction half-shell.
-        let mut pairs: Vec<(usize, usize)> = Vec::with_capacity(n * 20);
-        for cell_idx in 0..total_cells {
-            let cz = cell_idx % n_cells;
-            let cy = (cell_idx / n_cells) % n_cells;
-            let cx = cell_idx / (n_cells * n_cells);
+        // Per-molecule cell index, for neighbor enumeration.
+        let mol_cell: Vec<usize> = (0..n).map(|i| {
+            let mol = &self.molecules[i];
+            let cx = (((mol.center_x + half) / cell_size) as usize).min(n_cells - 1);
+            let cy = (((mol.center_y + half) / cell_size) as usize).min(n_cells - 1);
+            let cz = (((mol.center_z + half) / cell_size) as usize).min(n_cells - 1);
+            cx * n_cells * n_cells + cy * n_cells + cz
+        }).collect();
 
-            let cell = &cells[cell_idx];
-            for a in 0..cell.len() {
-                for b in (a + 1)..cell.len() {
-                    pairs.push((cell[a], cell[b]));
-                }
-            }
-            for dcx in 0..=1_i32 {
-                let start_cy = if dcx == 0 { 0 } else { -1_i32 };
-                for dcy in start_cy..=1_i32 {
-                    let start_cz = if dcx == 0 && dcy == 0 { 1 } else { -1_i32 };
-                    for dcz in start_cz..=1_i32 {
-                        let nx = (cx as i32 + dcx).rem_euclid(n_cells as i32) as usize;
-                        let ny = (cy as i32 + dcy).rem_euclid(n_cells as i32) as usize;
-                        let nz = (cz as i32 + dcz).rem_euclid(n_cells as i32) as usize;
-                        let neighbor_idx = nx * n_cells * n_cells + ny * n_cells + nz;
-                        for &i in &cells[cell_idx] {
-                            for &j in &cells[neighbor_idx] {
-                                pairs.push((i, j));
+        // Per-molecule parallel. Each thread owns one output slot and writes
+        // only there — no coordination, no collect, no fold/reduce.
+        // The output tuple is packed as (fx, fy, fz, tx, ty, tz, virial_half).
+        let mut accum: Vec<(f64, f64, f64, f64, f64, f64, f64)> =
+            vec![(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0); n];
+
+        let use_periodic = self.use_periodic;
+        let ncells_i = n_cells as i32;
+        accum.par_iter_mut().enumerate().for_each(|(i, out)| {
+            // Walk the 27 neighboring cells of i's cell (full shell, not
+            // half, since each molecule accumulates its own total force).
+            let my_cell = mol_cell[i];
+            let cx = my_cell / (n_cells * n_cells);
+            let cy = (my_cell / n_cells) % n_cells;
+            let cz = my_cell % n_cells;
+            for dcx in -1_i32..=1 {
+                for dcy in -1_i32..=1 {
+                    for dcz in -1_i32..=1 {
+                        let rx = cx as i32 + dcx;
+                        let ry = cy as i32 + dcy;
+                        let rz = cz as i32 + dcz;
+                        // Skip out-of-bounds neighbors when walls are on,
+                        // wrap around when boundaries are periodic.
+                        let (nx, ny, nz) = if use_periodic {
+                            (
+                                rx.rem_euclid(ncells_i) as usize,
+                                ry.rem_euclid(ncells_i) as usize,
+                                rz.rem_euclid(ncells_i) as usize,
+                            )
+                        } else {
+                            if rx < 0 || rx >= ncells_i || ry < 0 || ry >= ncells_i
+                                || rz < 0 || rz >= ncells_i { continue; }
+                            (rx as usize, ry as usize, rz as usize)
+                        };
+                        let nc = nx * n_cells * n_cells + ny * n_cells + nz;
+                        for &j in &cells[nc] {
+                            if i == j { continue; }
+                            // compute_pair_force returns deltas assuming i<j
+                            // (d.f_i for the lower index). Feed ordered pair
+                            // but pick the correct side for molecule i.
+                            let (lo, hi) = if i < j { (i, j) } else { (j, i) };
+                            if let Some(d) = self.compute_pair_force(lo, hi, cutoff2) {
+                                let (fx, fy, fz, tx, ty, tz) = if i < j {
+                                    (d.f_i.0, d.f_i.1, d.f_i.2, d.t_i.0, d.t_i.1, d.t_i.2)
+                                } else {
+                                    (d.f_j.0, d.f_j.1, d.f_j.2, d.t_j.0, d.t_j.1, d.t_j.2)
+                                };
+                                out.0 += fx; out.1 += fy; out.2 += fz;
+                                out.3 += tx; out.4 += ty; out.5 += tz;
+                                // Each pair contributes virial twice (once per
+                                // endpoint), so halve to avoid double-counting
+                                // after the serial sum below.
+                                out.6 += d.virial * 0.5;
                             }
                         }
                     }
                 }
             }
-        }
+        });
 
-        // Step 2: parallel compute. filter_map so pairs beyond the cutoff
-        // contribute nothing. with_min_len keeps work chunks big enough that
-        // rayon's per-chunk overhead stays below the per-pair compute.
-        let deltas: Vec<(usize, usize, PairDelta)> = pairs
-            .par_iter()
-            .with_min_len(16)
-            .filter_map(|&(i, j)| {
-                self.compute_pair_force(i, j, cutoff2).map(|d| (i, j, d))
-            })
-            .collect();
-
-        // Step 3: serial apply (just float adds; tiny compared to Coulomb+LJ).
-        for (i, j, d) in deltas {
-            apply_pair(&d, i, j, forces, torques, virial);
+        // Serial sum into caller's buffers. No alloc, tiny work.
+        for i in 0..n {
+            let a = accum[i];
+            forces[i].0 += a.0; forces[i].1 += a.1; forces[i].2 += a.2;
+            torques[i].0 += a.3; torques[i].1 += a.4; torques[i].2 += a.5;
+            *virial += a.6;
         }
     }
 
@@ -1015,50 +1203,30 @@ impl SimulationSystem {
         let img_dy = dy - (mol_b.center_y - mol_a.center_y);
         let img_dz = dz - (mol_b.center_z - mol_a.center_z);
 
-        // Compute virtual site positions for both molecules
-        let mut a_virt_sites: Vec<(f64, f64, f64, f64)> = Vec::new(); // (x, y, z, charge)
-        let mut b_virt_sites: Vec<(f64, f64, f64, f64)> = Vec::new();
+        // Compute virtual site positions for both molecules. We support up to
+        // two vsites per molecule on the stack so this hot path allocates
+        // nothing (a previous Vec-based version heap-allocated per pair and
+        // serialised rayon workers on the wasm allocator).
+        let mut a_virt_sites: [(f64, f64, f64, f64); 2] = [(0.0, 0.0, 0.0, 0.0); 2];
+        let mut b_virt_sites: [(f64, f64, f64, f64); 2] = [(0.0, 0.0, 0.0, 0.0); 2];
+        let mut a_n_vs = 0usize;
+        let mut b_n_vs = 0usize;
 
         for vs in &mol_a.virtual_sites {
-            if vs.site_type == "tip4p" {
+            if vs.site_type == "tip4p" && a_n_vs < 2 {
                 let (x, y, z) = crate::compute_tip4p_m_site(&mol_a.atoms, &vs.ref_atoms);
-                a_virt_sites.push((x, y, z, vs.charge));
+                a_virt_sites[a_n_vs] = (x, y, z, vs.charge);
+                a_n_vs += 1;
             }
         }
 
         for vs in &mol_b.virtual_sites {
-            if vs.site_type == "tip4p" {
+            if vs.site_type == "tip4p" && b_n_vs < 2 {
                 let (x, y, z) = crate::compute_tip4p_m_site(&mol_b.atoms, &vs.ref_atoms);
-                // Shift B's virtual sites by the periodic image offset
-                b_virt_sites.push((x + img_dx, y + img_dy, z + img_dz, vs.charge));
+                b_virt_sites[b_n_vs] = (x + img_dx, y + img_dy, z + img_dz, vs.charge);
+                b_n_vs += 1;
             }
         }
-
-        // Helper to compute Coulomb force between a charge site and an atom
-        let coulomb_to_atom = |ax: f64, ay: f64, az: f64, q_a: f64,
-                               bx: f64, by: f64, bz: f64, q_b: f64| -> (f64, f64, f64) {
-            let dx = bx - ax;
-            let dy = by - ay;
-            let dz = bz - az;
-            let r2 = dx * dx + dy * dy + dz * dz;
-            if r2 < 0.01 { return (0.0, 0.0, 0.0); }
-            let r = r2.sqrt();
-            let f_scale = -crate::COULOMB_K * q_a * q_b / (r * r2);
-            (f_scale * dx, f_scale * dy, f_scale * dz)
-        };
-
-        // Helper to compute Coulomb force between two charge sites
-        let coulomb_site_site = |ax: f64, ay: f64, az: f64, q_a: f64,
-                                  bx: f64, by: f64, bz: f64, q_b: f64| -> (f64, f64, f64) {
-            let dx = bx - ax;
-            let dy = by - ay;
-            let dz = bz - az;
-            let r2 = dx * dx + dy * dy + dz * dz;
-            if r2 < 0.01 { return (0.0, 0.0, 0.0); }
-            let r = r2.sqrt();
-            let f_scale = -crate::COULOMB_K * q_a * q_b / (r * r2);
-            (f_scale * dx, f_scale * dy, f_scale * dz)
-        };
 
         for a_atom in &mol_a.atoms {
             // Lever arm for molecule A: atom_a world - center_a
@@ -1067,22 +1235,22 @@ impl SimulationSystem {
             let raz = a_atom.z - mol_a.center_z;
 
             for b_atom in &mol_b.atoms {
-                // For cross-cell pair forces under PBC, temporarily shift b_atom
-                // into the same periodic image as a so force calculation uses
-                // the minimum-image distance.
-                let b_img = crate::Atom {
-                    x: b_atom.x + img_dx,
-                    y: b_atom.y + img_dy,
-                    z: b_atom.z + img_dz,
-                    charge: b_atom.charge,
-                    epsilon: b_atom.epsilon,
-                    sigma: b_atom.sigma,
-                    mass: b_atom.mass,
-                    element: b_atom.element.clone(),
-                };
+                // For cross-cell pair forces under PBC, shift b_atom into the
+                // same periodic image as a. Use raw-coordinate helpers so we
+                // never construct an image-shifted `Atom` (which cloned the
+                // element String and serialised the allocator across threads).
+                let bx = b_atom.x + img_dx;
+                let by = b_atom.y + img_dy;
+                let bz = b_atom.z + img_dz;
 
-                let (cfx, cfy, cfz) = coulomb_force(a_atom, &b_img);
-                let (lfx, lfy, lfz) = lj_force(a_atom, &b_img);
+                let (cfx, cfy, cfz) = coulomb_force_raw(
+                    a_atom.x, a_atom.y, a_atom.z, a_atom.charge,
+                    bx, by, bz, b_atom.charge,
+                );
+                let (lfx, lfy, lfz) = lj_force_raw(
+                    a_atom.x, a_atom.y, a_atom.z, a_atom.epsilon, a_atom.sigma,
+                    bx, by, bz, b_atom.epsilon, b_atom.sigma,
+                );
 
                 let fx = cfx + lfx;
                 let fy = cfy + lfy;
@@ -1095,9 +1263,9 @@ impl SimulationSystem {
                 // using the minimum-image position of b). Sums to the scalar
                 // virial W used in the virial equation of state,
                 //   P = (2 KE_trans + W) / (3 V).
-                let rdx = a_atom.x - b_img.x;
-                let rdy = a_atom.y - b_img.y;
-                let rdz = a_atom.z - b_img.z;
+                let rdx = a_atom.x - bx;
+                let rdy = a_atom.y - by;
+                let rdz = a_atom.z - bz;
                 d.virial += rdx * fx + rdy * fy + rdz * fz;
 
                 // Torque on A: r_a x F
@@ -1116,8 +1284,12 @@ impl SimulationSystem {
             }
 
             // A atom interacting with B's virtual sites (Coulomb only)
-            for &(vx, vy, vz, vq) in &b_virt_sites {
-                let (fx, fy, fz) = coulomb_to_atom(a_atom.x, a_atom.y, a_atom.z, a_atom.charge, vx, vy, vz, vq);
+            for k in 0..b_n_vs {
+                let (vx, vy, vz, vq) = b_virt_sites[k];
+                let (fx, fy, fz) = coulomb_force_raw(
+                    a_atom.x, a_atom.y, a_atom.z, a_atom.charge,
+                    vx, vy, vz, vq,
+                );
 
                 d.f_i.0 += fx; d.f_i.1 += fy; d.f_i.2 += fz;
                 d.f_j.0 -= fx; d.f_j.1 -= fy; d.f_j.2 -= fz;
@@ -1136,7 +1308,8 @@ impl SimulationSystem {
         }
 
         // A's virtual sites interacting with B's atoms
-        for &(vx, vy, vz, vq) in &a_virt_sites {
+        for k in 0..a_n_vs {
+            let (vx, vy, vz, vq) = a_virt_sites[k];
             for b_atom in &mol_b.atoms {
                 // Lever arm for virtual site (assumed at molecular center):
                 // no torque contribution for molecule A from this interaction.
@@ -1171,8 +1344,9 @@ impl SimulationSystem {
             }
 
             // Virtual site - virtual site interactions
-            for &(bx, by, bz, bq) in &b_virt_sites {
-                let (fx, fy, fz) = coulomb_site_site(vx, vy, vz, vq, bx, by, bz, bq);
+            for m in 0..b_n_vs {
+                let (bx, by, bz, bq) = b_virt_sites[m];
+                let (fx, fy, fz) = coulomb_force_raw(vx, vy, vz, vq, bx, by, bz, bq);
 
                 d.f_i.0 += fx; d.f_i.1 += fy; d.f_i.2 += fz;
                 d.f_j.0 -= fx; d.f_j.1 -= fy; d.f_j.2 -= fz;
