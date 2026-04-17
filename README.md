@@ -24,7 +24,27 @@ npm run build:wasm
 npm run dev
 ```
 
-Open http://localhost:3000 in your browser.
+Open **https://localhost:3000** in your browser (note the HTTPS — the
+dev server uses a self-signed cert; click "Advanced → Proceed" on the
+first visit).
+
+> ⚠️ Accessing the server from another machine over its IP address
+> (e.g. `https://10.0.0.5:3000`) works, but the browser will show a
+> cert warning. Plain `http://` over an IP will silently disable
+> wasm threading — the page needs a secure context for
+> `SharedArrayBuffer`. See `docs/PERFORMANCE.md` if something seems
+> to run single-threaded.
+
+First build requires Rust nightly (pinned automatically by
+`src/physics/rust-toolchain.toml`). `rustup install nightly` once,
+then `npm run build:wasm` handles the rest.
+
+### Pointers for maintainers
+
+- `docs/PERFORMANCE.md` — how the physics loop is fast, what dials
+  exist, what was tried and rejected.
+- `CLAUDE.md` — invariants, common failure modes, and patterns for
+  coding-agent handoffs.
 
 ## Build for Production
 
