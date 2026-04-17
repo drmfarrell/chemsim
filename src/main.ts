@@ -12,6 +12,7 @@ import init, {
   SimulationSystem,
   initThreadPool,
   init_persistent_pool,
+  shutdown_persistent_pool,
   bench_pool_dispatch,
   persistent_pool_ready,
   set_persistent_pool_workers,
@@ -77,6 +78,27 @@ let simSpeedMultiplier = 1;
 // Effective multiplier after the N-based auto-throttle. Equals
 // simSpeedMultiplier at small N; capped for larger systems.
 let effectiveSpeedMultiplier = 1;
+// Desired persistent-pool size (what the Threads slider is set to). The
+// live pool may be parked (workers shut down) when the sim is paused or
+// the tab is hidden — this holds the count to restore on resume.
+let desiredWorkerCount = 0;
+
+/// Park (shut down) or resume the persistent worker pool to match the
+/// sim's current run state. Workers spin at 100% CPU when alive, so we
+/// tear them down while the sim is paused / the tab is hidden to give
+/// the laptop a break, and bring them back up the moment the user hits
+/// Play again. Falls back to serial cell list while parked (compute
+/// path auto-detects pool_worker_count == 0).
+function matchPoolToRunState(): void {
+  if (!persistent_pool_ready() && desiredWorkerCount === 0) return;
+  const shouldRun = isSimulationRunning && currentMode === 'mode2' && !document.hidden;
+  const alive = persistent_pool_worker_count() > 0;
+  if (shouldRun && !alive && desiredWorkerCount > 0) {
+    init_persistent_pool(desiredWorkerCount);
+  } else if (!shouldRun && alive) {
+    shutdown_persistent_pool();
+  }
+}
 let showInteractionNetwork = false;
 let networkLines: THREE.LineSegments | null = null;
 let statsUpdateCounter = 0;
@@ -123,6 +145,11 @@ async function main() {
       const workerCount = Math.max(1, Math.min(nCores, storedWorkers));
       init_persistent_pool(workerCount);
       console.log(`ChemSim: persistent spin-pool ready (${workerCount} workers, ${nCores} available)`);
+      // Park the workers immediately — we don't enter Mode 2 on load, so
+      // nothing's asking for forces yet. They'll spin back up when the
+      // user hits Play.
+      desiredWorkerCount = workerCount;
+      shutdown_persistent_pool();
       // Stash for the UI wiring below.
       (globalThis as any).__chemsim_core_limit = nCores;
     } catch (e) {
@@ -362,7 +389,14 @@ function setupUI(): void {
     isSimulationRunning = !isSimulationRunning;
     btn.textContent = isSimulationRunning ? 'Pause' : 'Play';
     btn.classList.toggle('active', isSimulationRunning);
+    // Park the spin-waiting pool on pause so the laptop's fans stop
+    // screaming; wake it on resume.
+    matchPoolToRunState();
   });
+
+  // Also park workers when the tab is backgrounded — no point burning
+  // 2000% CPU for a simulation nobody can see.
+  document.addEventListener('visibilitychange', matchPoolToRunState);
 
   // Mode 2: Speed slider
   const speedSlider = document.getElementById('sim-speed-slider') as HTMLInputElement;
@@ -438,7 +472,8 @@ function setupUI(): void {
   const threadsValue = document.getElementById('threads-value') as HTMLSpanElement;
   const threadsMaxLabel = document.getElementById('threads-max-label') as HTMLSpanElement;
   const coreLimit = ((globalThis as any).__chemsim_core_limit as number) ?? 1;
-  const initialWorkers = persistent_pool_ready() ? persistent_pool_worker_count() : 0;
+  // After the startup-time shutdown, desiredWorkerCount holds the target.
+  const initialWorkers = desiredWorkerCount;
   if (initialWorkers === 0) {
     // No threading available (insecure context or init failed) — hide the
     // knob so students aren't confused by a dead control.
@@ -454,9 +489,15 @@ function setupUI(): void {
     });
     threadsSlider.addEventListener('change', () => {
       const n = parseInt(threadsSlider.value);
-      set_persistent_pool_workers(n);
+      desiredWorkerCount = n;
       localStorage.setItem('chemsim.workers', String(n));
-      console.log(`ChemSim: persistent pool resized to ${n} workers`);
+      // If the pool is currently alive, resize it in place. If it's
+      // parked (paused / hidden tab), just update the target — next
+      // resume will use the new count.
+      if (persistent_pool_worker_count() > 0) {
+        set_persistent_pool_workers(n);
+      }
+      console.log(`ChemSim: persistent pool target = ${n} workers`);
     });
   }
 
@@ -1408,6 +1449,10 @@ function clearMode2(): void {
 function switchMode(mode: 'mode1' | 'mode2'): void {
   currentMode = mode;
   isSimulationRunning = false;
+  // Mode change means either (a) we're leaving mode 2 so workers can
+  // park, or (b) we're entering mode 2 but Play hasn't been hit yet —
+  // either way, the right state is "parked".
+  matchPoolToRunState();
 
   // Clean up both modes
   moleculeA?.dispose();
