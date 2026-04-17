@@ -82,6 +82,15 @@ pub struct SimulationSystem {
     use_periodic: bool,
     cutoff: f64,           // interaction cutoff in Angstroms
     forces: Vec<(f64, f64, f64)>,
+    // Torques from the end-of-step force evaluation, cached alongside
+    // `forces` so `step()` can reuse them as the start-of-next-step values
+    // instead of recomputing. See `forces_valid`.
+    torques_cache: Vec<(f64, f64, f64)>,
+    // True when `forces` and `torques_cache` are still consistent with the
+    // current atom positions (i.e. nothing has moved an atom since the last
+    // compute_all_forces call). Invalidated by: barostat scaling, add/remove
+    // molecule, direct position setters, cutoff change.
+    forces_valid: bool,
     step_count: u64,
 
     // Barostat state (Berendsen-style isotropic pressure coupling).
@@ -107,6 +116,8 @@ impl SimulationSystem {
             use_periodic: false,
             cutoff: 12.0,
             forces: Vec::new(),
+            torques_cache: Vec::new(),
+            forces_valid: false,
             step_count: 0,
 
             use_barostat: false,
@@ -172,6 +183,7 @@ impl SimulationSystem {
         let idx = self.molecules.len();
         self.molecules.push(mol);
         self.forces.push((0.0, 0.0, 0.0));
+        self.forces_valid = false;
         Ok(idx)
     }
 
@@ -179,6 +191,8 @@ impl SimulationSystem {
     pub fn clear(&mut self) {
         self.molecules.clear();
         self.forces.clear();
+        self.torques_cache.clear();
+        self.forces_valid = false;
         self.step_count = 0;
     }
 
@@ -187,6 +201,7 @@ impl SimulationSystem {
         if !self.molecules.is_empty() {
             self.molecules.pop();
             self.forces.pop();
+            self.forces_valid = false;
         }
     }
 
@@ -198,6 +213,7 @@ impl SimulationSystem {
         let dy = y - mol.center_y;
         let dz = z - mol.center_z;
         mol.translate(dx, dy, dz);
+        self.forces_valid = false;
     }
 
     /// Set the orientation of a specific molecule (for the Mode 1 rotation
@@ -218,6 +234,7 @@ impl SimulationSystem {
         crate::rotation::quat_normalize(&mut q);
         mol.q = q;
         crate::rotation::update_atom_positions(mol);
+        self.forces_valid = false;
     }
 
     /// Get molecule center position
@@ -412,12 +429,12 @@ impl SimulationSystem {
     }
 
     /// Configure simulation parameters
-    pub fn set_box_size(&mut self, size: f64) { self.box_size = size; }
+    pub fn set_box_size(&mut self, size: f64) { self.box_size = size; self.forces_valid = false; }
     pub fn set_timestep(&mut self, dt: f64) { self.timestep = dt; }
     pub fn set_temperature(&mut self, temp: f64) { self.target_temperature = temp; }
     pub fn set_thermostat(&mut self, enabled: bool) { self.use_thermostat = enabled; }
-    pub fn set_periodic(&mut self, enabled: bool) { self.use_periodic = enabled; }
-    pub fn set_cutoff(&mut self, cutoff: f64) { self.cutoff = cutoff; }
+    pub fn set_periodic(&mut self, enabled: bool) { self.use_periodic = enabled; self.forces_valid = false; }
+    pub fn set_cutoff(&mut self, cutoff: f64) { self.cutoff = cutoff; self.forces_valid = false; }
 
     pub fn get_temperature(&self) -> f64 { compute_temperature(&self.molecules) }
     pub fn get_kinetic_energy(&self) -> f64 { kinetic_energy(&self.molecules) }
@@ -551,8 +568,21 @@ impl SimulationSystem {
         let n = self.molecules.len();
         if n == 0 { return; }
 
-        // Compute forces, torques, and virial at current state.
-        let (forces, torques, _virial0) = self.compute_all_forces();
+        // The forces and torques at the current (start-of-step) positions
+        // are identical to the ones computed at the *end* of the previous
+        // step's second evaluation — positions don't change between step
+        // boundaries unless the barostat rescales them. Reuse that cached
+        // work when we can; otherwise recompute. This cuts ~half the pair-
+        // force calls in a typical run.
+        let (forces, torques) = if self.forces_valid
+            && self.forces.len() == n
+            && self.torques_cache.len() == n
+        {
+            (self.forces.clone(), self.torques_cache.clone())
+        } else {
+            let (f, t, _v) = self.compute_all_forces();
+            (f, t)
+        };
 
         // Velocity Verlet position step for translation.
         let old_accel = verlet_position_step(&mut self.molecules, &forces, self.timestep);
@@ -569,7 +599,7 @@ impl SimulationSystem {
         integrate_rotation(&mut self.molecules, &torques, self.timestep);
 
         // Compute new forces + torques + virial at updated positions.
-        let (new_forces, _new_torques, new_virial) = self.compute_all_forces();
+        let (new_forces, new_torques, new_virial) = self.compute_all_forces();
 
         // Velocity Verlet velocity step.
         verlet_velocity_step(&mut self.molecules, &old_accel, &new_forces, self.timestep);
@@ -590,12 +620,18 @@ impl SimulationSystem {
         self.last_virial = new_virial;
         self.last_pressure_bar = self.compute_pressure_bar();
 
-        // Apply barostat (rescale box + molecule COMs).
-        if self.use_barostat && self.use_periodic {
+        // Apply barostat (rescale box + molecule COMs). This moves atom
+        // positions, so the cached end-of-step forces/torques no longer
+        // match the current positions — invalidate so the next step
+        // recomputes them.
+        let barostat_ran = self.use_barostat && self.use_periodic;
+        if barostat_ran {
             self.apply_barostat();
         }
 
         self.forces = new_forces;
+        self.torques_cache = new_torques;
+        self.forces_valid = !barostat_ran;
         self.step_count += 1;
     }
 
