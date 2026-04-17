@@ -62,6 +62,8 @@ pub fn update_atom_positions(mol: &mut Molecule) {
         atom.y = mol.center_y + wy;
         atom.z = mol.center_z + wz;
     }
+    // Keep the SoA position cache (used by the SIMD force kernel) in sync.
+    mol.sync_positions_only();
 }
 
 /// Integrate angular motion for one timestep using semi-implicit Euler on the

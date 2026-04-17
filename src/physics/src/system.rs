@@ -4,7 +4,7 @@ use crate::{Atom, Molecule, InteractionResult, VirtualSite};
 use crate::coulomb::{coulomb_energy, coulomb_force, coulomb_force_raw, electric_field_at};
 use crate::lennard_jones::{lj_energy, lj_force, lj_force_raw, coulomb_lj_force_raw};
 #[cfg(target_feature = "simd128")]
-use crate::lennard_jones::coulomb_lj_force_raw_x2;
+use crate::lennard_jones::{coulomb_lj_force_raw_x2_v, load_f64x2};
 use crate::integrator::{verlet_position_step, verlet_velocity_step, kinetic_energy, compute_temperature};
 use crate::thermostat::{berendsen_thermostat, initialize_velocities};
 use crate::deformation::compute_cloud_deformation_flat;
@@ -158,9 +158,16 @@ impl SimulationSystem {
             omega_body: (0.0, 0.0, 0.0),
             inertia: (1.0, 1.0, 1.0),
             virtual_sites,
+            atom_pos_x: Vec::new(),
+            atom_pos_y: Vec::new(),
+            atom_pos_z: Vec::new(),
+            atom_charges: Vec::new(),
+            atom_epsilons: Vec::new(),
+            atom_sigmas: Vec::new(),
         };
         mol.compute_center();
         mol.init_rigid_body();
+        mol.sync_soa(); // populate the SoA caches used by the SIMD kernel
 
         let idx = self.molecules.len();
         self.molecules.push(mol);
@@ -1269,41 +1276,68 @@ impl SimulationSystem {
             let raz = a_atom.z - mol_a.center_z;
 
             // SIMD (wasm f64x2) path: two atom-atom pairs per kernel call.
-            // Scalar fallback for the final odd b_atom (e.g. TIP4P water has
-            // 3 atoms, so 1 SIMD pair + 1 scalar remainder per a_atom).
+            // Uses `load_f64x2` to pull adjacent B-atom positions and LJ
+            // constants out of the contiguous SoA arrays in one 16-byte
+            // load instead of two scalar loads + lane combines. A-side is
+            // splatted because the same a_atom participates in both pairs.
             #[cfg(target_feature = "simd128")]
             {
-                let b_slice = mol_b.atoms.as_slice();
-                let mut bi = 0;
-                while bi + 1 < b_slice.len() {
-                    let b0 = &b_slice[bi];
-                    let b1 = &b_slice[bi + 1];
-                    let bx0 = b0.x + img_dx; let by0 = b0.y + img_dy; let bz0 = b0.z + img_dz;
-                    let bx1 = b1.x + img_dx; let by1 = b1.y + img_dy; let bz1 = b1.z + img_dz;
+                use std::arch::wasm32::*;
+                let bx_arr = mol_b.atom_pos_x.as_slice();
+                let by_arr = mol_b.atom_pos_y.as_slice();
+                let bz_arr = mol_b.atom_pos_z.as_slice();
+                let bq_arr = mol_b.atom_charges.as_slice();
+                let beps_arr = mol_b.atom_epsilons.as_slice();
+                let bsig_arr = mol_b.atom_sigmas.as_slice();
+                let n_b = bx_arr.len();
 
-                    let ((fx0, fy0, fz0), (fx1, fy1, fz1)) = coulomb_lj_force_raw_x2(
-                        (a_atom.x, a_atom.x), (a_atom.y, a_atom.y), (a_atom.z, a_atom.z),
-                        (a_atom.charge, a_atom.charge),
-                        (a_atom.epsilon, a_atom.epsilon),
-                        (a_atom.sigma, a_atom.sigma),
-                        (bx0, bx1), (by0, by1), (bz0, bz1),
-                        (b0.charge, b1.charge),
-                        (b0.epsilon, b1.epsilon),
-                        (b0.sigma, b1.sigma),
+                // a-side broadcast: same a_atom for both pair lanes.
+                let vax = f64x2_splat(a_atom.x);
+                let vay = f64x2_splat(a_atom.y);
+                let vaz = f64x2_splat(a_atom.z);
+                let vaq = f64x2_splat(a_atom.charge);
+                let vaeps = f64x2_splat(a_atom.epsilon);
+                let vasig = f64x2_splat(a_atom.sigma);
+                let vimg_dx = f64x2_splat(img_dx);
+                let vimg_dy = f64x2_splat(img_dy);
+                let vimg_dz = f64x2_splat(img_dz);
+
+                let mut bi = 0;
+                while bi + 1 < n_b {
+                    // Wide unaligned loads — two adjacent f64s per instruction.
+                    let vbx = f64x2_add(load_f64x2(bx_arr, bi), vimg_dx);
+                    let vby = f64x2_add(load_f64x2(by_arr, bi), vimg_dy);
+                    let vbz = f64x2_add(load_f64x2(bz_arr, bi), vimg_dz);
+                    let vbq = load_f64x2(bq_arr, bi);
+                    let vbeps = load_f64x2(beps_arr, bi);
+                    let vbsig = load_f64x2(bsig_arr, bi);
+
+                    let ((fx0, fy0, fz0), (fx1, fy1, fz1)) = coulomb_lj_force_raw_x2_v(
+                        vax, vay, vaz, vaq, vaeps, vasig,
+                        vbx, vby, vbz, vbq, vbeps, vbsig,
                     );
+                    // Shifted b positions for the virial + torque apply step.
+                    let bx0 = bx_arr[bi] + img_dx;
+                    let by0 = by_arr[bi] + img_dy;
+                    let bz0 = bz_arr[bi] + img_dz;
+                    let bx1 = bx_arr[bi + 1] + img_dx;
+                    let by1 = by_arr[bi + 1] + img_dy;
+                    let bz1 = bz_arr[bi + 1] + img_dz;
+                    let b0 = &mol_b.atoms[bi];
+                    let b1 = &mol_b.atoms[bi + 1];
                     accumulate_atom_pair!(a_atom, rax, ray, raz, bx0, by0, bz0, b0, fx0, fy0, fz0);
                     accumulate_atom_pair!(a_atom, rax, ray, raz, bx1, by1, bz1, b1, fx1, fy1, fz1);
                     bi += 2;
                 }
-                if bi < b_slice.len() {
-                    let b_atom = &b_slice[bi];
-                    let bx = b_atom.x + img_dx;
-                    let by = b_atom.y + img_dy;
-                    let bz = b_atom.z + img_dz;
+                if bi < n_b {
+                    let bx = bx_arr[bi] + img_dx;
+                    let by = by_arr[bi] + img_dy;
+                    let bz = bz_arr[bi] + img_dz;
                     let (fx, fy, fz) = coulomb_lj_force_raw(
                         a_atom.x, a_atom.y, a_atom.z, a_atom.charge, a_atom.epsilon, a_atom.sigma,
-                        bx, by, bz, b_atom.charge, b_atom.epsilon, b_atom.sigma,
+                        bx, by, bz, bq_arr[bi], beps_arr[bi], bsig_arr[bi],
                     );
+                    let b_atom = &mol_b.atoms[bi];
                     accumulate_atom_pair!(a_atom, rax, ray, raz, bx, by, bz, b_atom, fx, fy, fz);
                 }
             }

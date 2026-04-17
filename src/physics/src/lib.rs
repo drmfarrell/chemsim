@@ -89,9 +89,51 @@ pub struct Molecule {
     /// Virtual sites (massless charge points like TIP4P M site)
     #[serde(default)]
     pub virtual_sites: Vec<VirtualSite>,
+
+    /// SoA mirrors of atom positions and force-field constants. Kept adjacent
+    /// in memory so the SIMD force kernel can use 16-byte v128 loads to read
+    /// two atoms' x (or y, z, charge, ...) at once — the AoS `atoms` Vec
+    /// spaces each f64 ~80 bytes apart, defeating wide loads.
+    /// Positions are re-synced whenever `translate` or `update_atom_positions`
+    /// runs; the LJ / charge arrays are populated once on molecule creation
+    /// and never change during a simulation.
+    #[serde(default, skip)]
+    pub atom_pos_x: Vec<f64>,
+    #[serde(default, skip)]
+    pub atom_pos_y: Vec<f64>,
+    #[serde(default, skip)]
+    pub atom_pos_z: Vec<f64>,
+    #[serde(default, skip)]
+    pub atom_charges: Vec<f64>,
+    #[serde(default, skip)]
+    pub atom_epsilons: Vec<f64>,
+    #[serde(default, skip)]
+    pub atom_sigmas: Vec<f64>,
 }
 
 fn identity_quat() -> (f64, f64, f64, f64) { (1.0, 0.0, 0.0, 0.0) }
+
+impl Default for Molecule {
+    fn default() -> Self {
+        Self {
+            atoms: Vec::new(),
+            center_x: 0.0, center_y: 0.0, center_z: 0.0,
+            vx: 0.0, vy: 0.0, vz: 0.0,
+            polarizability: 0.0,
+            body_coords: Vec::new(),
+            q: identity_quat(),
+            omega_body: (0.0, 0.0, 0.0),
+            inertia: (1.0, 1.0, 1.0),
+            virtual_sites: Vec::new(),
+            atom_pos_x: Vec::new(),
+            atom_pos_y: Vec::new(),
+            atom_pos_z: Vec::new(),
+            atom_charges: Vec::new(),
+            atom_epsilons: Vec::new(),
+            atom_sigmas: Vec::new(),
+        }
+    }
+}
 
 impl Molecule {
     pub fn compute_center(&mut self) {
@@ -108,9 +150,46 @@ impl Molecule {
             atom.y += dy;
             atom.z += dz;
         }
+        // Keep SoA position cache in sync. Skipping this makes the force
+        // kernel read stale data.
+        for x in self.atom_pos_x.iter_mut() { *x += dx; }
+        for y in self.atom_pos_y.iter_mut() { *y += dy; }
+        for z in self.atom_pos_z.iter_mut() { *z += dz; }
         self.center_x += dx;
         self.center_y += dy;
         self.center_z += dz;
+    }
+
+    /// Rebuild the SoA caches from `atoms`. Call after any bulk change to
+    /// atoms: after `add_molecule`, or after the rotation integrator writes
+    /// new world positions. `translate` updates in place so doesn't need it.
+    pub fn sync_soa(&mut self) {
+        let n = self.atoms.len();
+        self.atom_pos_x.resize(n, 0.0);
+        self.atom_pos_y.resize(n, 0.0);
+        self.atom_pos_z.resize(n, 0.0);
+        self.atom_charges.resize(n, 0.0);
+        self.atom_epsilons.resize(n, 0.0);
+        self.atom_sigmas.resize(n, 0.0);
+        for (i, a) in self.atoms.iter().enumerate() {
+            self.atom_pos_x[i] = a.x;
+            self.atom_pos_y[i] = a.y;
+            self.atom_pos_z[i] = a.z;
+            self.atom_charges[i] = a.charge;
+            self.atom_epsilons[i] = a.epsilon;
+            self.atom_sigmas[i] = a.sigma;
+        }
+    }
+
+    /// Cheaper position-only sync for the rotation integrator, which rewrites
+    /// x/y/z but doesn't touch the constant charges/LJ params.
+    #[inline]
+    pub fn sync_positions_only(&mut self) {
+        for (i, a) in self.atoms.iter().enumerate() {
+            self.atom_pos_x[i] = a.x;
+            self.atom_pos_y[i] = a.y;
+            self.atom_pos_z[i] = a.z;
+        }
     }
 
     pub fn total_mass(&self) -> f64 {

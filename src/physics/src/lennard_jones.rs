@@ -96,6 +96,87 @@ pub fn coulomb_lj_force_raw(
     (f_scale * dx, f_scale * dy, f_scale * dz)
 }
 
+/// Wide unaligned load of two adjacent f64s from a slice into a v128. Trusts
+/// wasm's native unaligned v128 loads; the cast from `*const f64` to
+/// `*const v128` bypasses Rust's 16-byte alignment requirement on v128 but
+/// wasm hardware handles it directly.
+#[cfg(target_feature = "simd128")]
+#[inline(always)]
+pub fn load_f64x2(src: &[f64], offset: usize) -> std::arch::wasm32::v128 {
+    debug_assert!(offset + 1 < src.len() || offset + 2 <= src.len());
+    unsafe {
+        std::ptr::read_unaligned(
+            src.as_ptr().add(offset) as *const std::arch::wasm32::v128,
+        )
+    }
+}
+
+/// SIMD (wasm f64x2) version of the fused Coulomb+LJ kernel that evaluates
+/// two atom-atom pairs per instruction. Takes pre-loaded `v128` inputs so
+/// the caller can use `load_f64x2` (a single wide load) instead of pair-
+/// wise scalar loads plus lane combines.
+///
+/// `vaX` lanes hold (ax0, ax1) etc. — same for bX, aq/bq, a/b eps/sig. The
+/// lanes encode two pair evaluations running in parallel. Lanes where
+/// r^2 < 0.01 or epsilon == 0 are masked to zero so single-atom ions go
+/// through the same kernel without a branch inside the hot loop.
+#[cfg(target_feature = "simd128")]
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+pub fn coulomb_lj_force_raw_x2_v(
+    vax: std::arch::wasm32::v128, vay: std::arch::wasm32::v128, vaz: std::arch::wasm32::v128,
+    vaq: std::arch::wasm32::v128, vaeps: std::arch::wasm32::v128, vasig: std::arch::wasm32::v128,
+    vbx: std::arch::wasm32::v128, vby: std::arch::wasm32::v128, vbz: std::arch::wasm32::v128,
+    vbq: std::arch::wasm32::v128, vbeps: std::arch::wasm32::v128, vbsig: std::arch::wasm32::v128,
+) -> ((f64, f64, f64), (f64, f64, f64)) {
+    use std::arch::wasm32::*;
+    {
+        let dx = f64x2_sub(vbx, vax);
+        let dy = f64x2_sub(vby, vay);
+        let dz = f64x2_sub(vbz, vaz);
+        let r2 = f64x2_add(
+            f64x2_add(f64x2_mul(dx, dx), f64x2_mul(dy, dy)),
+            f64x2_mul(dz, dz),
+        );
+
+        let min_r2 = f64x2_splat(0.01);
+        let r2_valid = f64x2_ge(r2, min_r2);
+        let r2_safe = v128_bitselect(r2, f64x2_splat(1.0), r2_valid);
+        let r = f64x2_sqrt(r2_safe);
+        let r3 = f64x2_mul(r, r2_safe);
+
+        let neg_k = f64x2_splat(-crate::COULOMB_K);
+        let f_c = f64x2_div(f64x2_mul(f64x2_mul(neg_k, vaq), vbq), r3);
+
+        let sigma = f64x2_mul(f64x2_splat(0.5), f64x2_add(vasig, vbsig));
+        let eps_sq = f64x2_mul(vaeps, vbeps);
+        let eps_valid = f64x2_ge(eps_sq, f64x2_splat(1e-20));
+        let eps_sq_safe = v128_bitselect(eps_sq, f64x2_splat(1.0), eps_valid);
+        let eps = f64x2_sqrt(eps_sq_safe);
+        let s2 = f64x2_div(f64x2_mul(sigma, sigma), r2_safe);
+        let s6 = f64x2_mul(f64x2_mul(s2, s2), s2);
+        let s12 = f64x2_mul(s6, s6);
+        let twelve_s12 = f64x2_mul(f64x2_splat(12.0), s12);
+        let six_s6 = f64x2_mul(f64x2_splat(6.0), s6);
+        let f_lj_raw = f64x2_div(
+            f64x2_mul(f64x2_mul(f64x2_splat(-4.0), eps), f64x2_sub(twelve_s12, six_s6)),
+            r2_safe,
+        );
+        let f_lj = v128_bitselect(f_lj_raw, f64x2_splat(0.0), eps_valid);
+
+        let f_scale_raw = f64x2_add(f_c, f_lj);
+        let f_scale = v128_bitselect(f_scale_raw, f64x2_splat(0.0), r2_valid);
+
+        let fx = f64x2_mul(f_scale, dx);
+        let fy = f64x2_mul(f_scale, dy);
+        let fz = f64x2_mul(f_scale, dz);
+        (
+            (f64x2_extract_lane::<0>(fx), f64x2_extract_lane::<0>(fy), f64x2_extract_lane::<0>(fz)),
+            (f64x2_extract_lane::<1>(fx), f64x2_extract_lane::<1>(fy), f64x2_extract_lane::<1>(fz)),
+        )
+    }
+}
+
 /// SIMD (wasm f64x2) version of the fused Coulomb+LJ kernel that evaluates
 /// two atom-atom pairs per instruction. Returns (fx, fy, fz) for both pairs
 /// as ((fx0, fy0, fz0), (fx1, fy1, fz1)).
@@ -115,7 +196,7 @@ pub fn coulomb_lj_force_raw_x2(
     bq: (f64, f64), beps: (f64, f64), bsig: (f64, f64),
 ) -> ((f64, f64, f64), (f64, f64, f64)) {
     use std::arch::wasm32::*;
-    unsafe {
+    {
         let vax = f64x2(ax.0, ax.1);
         let vay = f64x2(ay.0, ay.1);
         let vaz = f64x2(az.0, az.1);
