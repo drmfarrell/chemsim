@@ -17,7 +17,7 @@ import init, {
 } from './wasm-pkg/chemsim_physics';
 
 // Molecule count presets for box mode (perfect cubes for even grid placement)
-const MOLECULE_COUNT_PRESETS = [8, 27, 64, 125, 216]; // 2³, 3³, 4³, 5³, 6³ - capped for smooth animation
+const MOLECULE_COUNT_PRESETS = [8, 27, 64, 125, 216, 343, 512, 729, 1000]; // 2³..10³
 
 // Application state
 let sceneManager: SceneManager;
@@ -265,7 +265,7 @@ function setupUI(): void {
   });
 
   // Molecule count slider - uses preset perfect cube values for even grid placement
-  const MOLECULE_COUNT_PRESETS = [8, 27, 64, 125, 216]; // 2³, 3³, 4³, 5³, 6³ - capped for smooth animation
+  const MOLECULE_COUNT_PRESETS = [8, 27, 64, 125, 216, 343, 512, 729, 1000]; // 2³..10³
   const countSlider = document.getElementById('molecule-count-slider') as HTMLInputElement;
   const countValue = document.getElementById('molecule-count-value') as HTMLSpanElement;
   const updateCountDisplay = () => {
@@ -910,15 +910,19 @@ function updateMode2(_dt: number): void {
     if (nMol > 200) baseSteps = 2;
     if (nMol > 400) baseSteps = 1;
     const requested = baseSteps * simSpeedMultiplier;
-    // Auto-throttle: physics cost scales ~quadratically with N, so the same
-    // speed multiplier that feels snappy at N=27 can crawl the browser at
-    // N=64+. Cap steps-per-frame so the main thread stays under ~20ms of
-    // physics per frame (keeping render ~30+ FPS). The effective multiplier
-    // is then min(slider, cap). Calibration: N=27 allows 100 steps/frame
-    // (20x * 5 base), N=64 caps ~42 steps/frame, N=128 caps ~21.
+    // Auto-throttle: physics cost scales ~linearly with N (cell list),
+    // but we pay the cost once per frame, so keep wall-clock within a
+    // ~30 FPS budget. Calibration factor 800 accounts for the persistent-
+    // thread speedup (~8x on the physics critical path) compared to the
+    // earlier single-thread cap of 100.
+    //   N <= 216   -> no cap (full 20x slider = 100 steps/frame fits)
+    //   N ~ 343    -> ~12x effective cap
+    //   N ~ 512    -> ~8x
+    //   N ~ 729    -> ~6x
+    //   N ~ 1000   -> ~4x
     const maxStepsPerFrame = nMol <= 27
-      ? 100
-      : Math.max(5, Math.round((100 * 27) / nMol));
+      ? 1000
+      : Math.max(5, Math.round((800 * 27) / nMol));
     const stepsPerFrame = Math.min(requested, maxStepsPerFrame);
     physics.step_n(stepsPerFrame);
     // Expose effective multiplier for the UI readout.
