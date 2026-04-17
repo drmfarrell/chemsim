@@ -1,11 +1,11 @@
 import * as THREE from 'three';
-import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import { TrackballControls } from 'three/examples/jsm/controls/TrackballControls.js';
 
 export class SceneManager {
   public scene: THREE.Scene;
   public camera: THREE.PerspectiveCamera;
   public renderer: THREE.WebGLRenderer;
-  public controls: OrbitControls;
+  public controls: TrackballControls;
 
   private container: HTMLElement;
   private animationCallbacks: Array<(dt: number) => void> = [];
@@ -42,9 +42,22 @@ export class SceneManager {
     this.container.appendChild(this.renderer.domElement);
 
     // Controls
-    this.controls = new OrbitControls(this.camera, this.renderer.domElement);
-    this.controls.enableDamping = true;
-    this.controls.dampingFactor = 0.08;
+    // TrackballControls instead of OrbitControls so the camera can spin
+    // freely in any direction — there's no physical "up" in a molecular
+    // scene, and OrbitControls' polar clamp was stopping vertical rotation
+    // at ±90° from the horizon. TrackballControls tracks its own up vector
+    // each frame so rotation is unbounded on both axes.
+    //
+    // Bindings (same as OrbitControls for user familiarity):
+    //   Left-drag   = rotate
+    //   Right-drag  = pan
+    //   Wheel / middle-drag = zoom
+    this.controls = new TrackballControls(this.camera, this.renderer.domElement);
+    this.controls.rotateSpeed = 3.0;
+    this.controls.zoomSpeed = 1.5;
+    this.controls.panSpeed = 0.8;
+    this.controls.staticMoving = false;
+    this.controls.dynamicDampingFactor = 0.15;
     this.controls.minDistance = 3;
     this.controls.maxDistance = 100;
 
