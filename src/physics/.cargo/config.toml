@@ -7,7 +7,10 @@
 # rust-toolchain.toml) for -Z build-std.
 [target.wasm32-unknown-unknown]
 rustflags = [
-  "-C", "target-feature=+atomics,+bulk-memory,+mutable-globals",
+  # simd128 enables wasm 128-bit SIMD so LLVM can vectorize the force kernels
+  # (f64x2 pair-parallel dx/dy/dz/r^2/sqrt) on top of the existing threading
+  # target features. Supported in all modern browsers.
+  "-C", "target-feature=+atomics,+bulk-memory,+mutable-globals,+simd128",
   "-C", "link-arg=--shared-memory",
   "-C", "link-arg=--import-memory",
   "-C", "link-arg=--max-memory=4294967296",

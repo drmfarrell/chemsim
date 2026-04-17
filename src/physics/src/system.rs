@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 use crate::{Atom, Molecule, InteractionResult, VirtualSite};
 use crate::coulomb::{coulomb_energy, coulomb_force, coulomb_force_raw, electric_field_at};
 use crate::lennard_jones::{lj_energy, lj_force, lj_force_raw, coulomb_lj_force_raw};
+#[cfg(target_feature = "simd128")]
+use crate::lennard_jones::coulomb_lj_force_raw_x2;
 use crate::integrator::{verlet_position_step, verlet_velocity_step, kinetic_energy, compute_temperature};
 use crate::thermostat::{berendsen_thermostat, initialize_velocities};
 use crate::deformation::compute_cloud_deformation_flat;
@@ -1233,52 +1235,89 @@ impl SimulationSystem {
             }
         }
 
+        // Inline per-pair accumulator. Shared between the SIMD batch and the
+        // scalar path so the body is identical.
+        macro_rules! accumulate_atom_pair {
+            ($a_atom:expr, $rax:expr, $ray:expr, $raz:expr,
+             $bx:expr, $by:expr, $bz:expr, $b_atom:expr,
+             $fx:expr, $fy:expr, $fz:expr) => {{
+                let fx = $fx; let fy = $fy; let fz = $fz;
+                d.f_i.0 += fx; d.f_i.1 += fy; d.f_i.2 += fz;
+                d.f_j.0 -= fx; d.f_j.1 -= fy; d.f_j.2 -= fz;
+
+                let rdx = $a_atom.x - $bx;
+                let rdy = $a_atom.y - $by;
+                let rdz = $a_atom.z - $bz;
+                d.virial += rdx * fx + rdy * fy + rdz * fz;
+
+                d.t_i.0 += $ray * fz - $raz * fy;
+                d.t_i.1 += $raz * fx - $rax * fz;
+                d.t_i.2 += $rax * fy - $ray * fx;
+
+                let rbx = $b_atom.x - mol_b.center_x;
+                let rby = $b_atom.y - mol_b.center_y;
+                let rbz = $b_atom.z - mol_b.center_z;
+                d.t_j.0 += rby * (-fz) - rbz * (-fy);
+                d.t_j.1 += rbz * (-fx) - rbx * (-fz);
+                d.t_j.2 += rbx * (-fy) - rby * (-fx);
+            }};
+        }
+
         for a_atom in &mol_a.atoms {
-            // Lever arm for molecule A: atom_a world - center_a
             let rax = a_atom.x - mol_a.center_x;
             let ray = a_atom.y - mol_a.center_y;
             let raz = a_atom.z - mol_a.center_z;
 
+            // SIMD (wasm f64x2) path: two atom-atom pairs per kernel call.
+            // Scalar fallback for the final odd b_atom (e.g. TIP4P water has
+            // 3 atoms, so 1 SIMD pair + 1 scalar remainder per a_atom).
+            #[cfg(target_feature = "simd128")]
+            {
+                let b_slice = mol_b.atoms.as_slice();
+                let mut bi = 0;
+                while bi + 1 < b_slice.len() {
+                    let b0 = &b_slice[bi];
+                    let b1 = &b_slice[bi + 1];
+                    let bx0 = b0.x + img_dx; let by0 = b0.y + img_dy; let bz0 = b0.z + img_dz;
+                    let bx1 = b1.x + img_dx; let by1 = b1.y + img_dy; let bz1 = b1.z + img_dz;
+
+                    let ((fx0, fy0, fz0), (fx1, fy1, fz1)) = coulomb_lj_force_raw_x2(
+                        (a_atom.x, a_atom.x), (a_atom.y, a_atom.y), (a_atom.z, a_atom.z),
+                        (a_atom.charge, a_atom.charge),
+                        (a_atom.epsilon, a_atom.epsilon),
+                        (a_atom.sigma, a_atom.sigma),
+                        (bx0, bx1), (by0, by1), (bz0, bz1),
+                        (b0.charge, b1.charge),
+                        (b0.epsilon, b1.epsilon),
+                        (b0.sigma, b1.sigma),
+                    );
+                    accumulate_atom_pair!(a_atom, rax, ray, raz, bx0, by0, bz0, b0, fx0, fy0, fz0);
+                    accumulate_atom_pair!(a_atom, rax, ray, raz, bx1, by1, bz1, b1, fx1, fy1, fz1);
+                    bi += 2;
+                }
+                if bi < b_slice.len() {
+                    let b_atom = &b_slice[bi];
+                    let bx = b_atom.x + img_dx;
+                    let by = b_atom.y + img_dy;
+                    let bz = b_atom.z + img_dz;
+                    let (fx, fy, fz) = coulomb_lj_force_raw(
+                        a_atom.x, a_atom.y, a_atom.z, a_atom.charge, a_atom.epsilon, a_atom.sigma,
+                        bx, by, bz, b_atom.charge, b_atom.epsilon, b_atom.sigma,
+                    );
+                    accumulate_atom_pair!(a_atom, rax, ray, raz, bx, by, bz, b_atom, fx, fy, fz);
+                }
+            }
+
+            #[cfg(not(target_feature = "simd128"))]
             for b_atom in &mol_b.atoms {
-                // For cross-cell pair forces under PBC, shift b_atom into the
-                // same periodic image as a. Use raw-coordinate helpers so we
-                // never construct an image-shifted `Atom` (which cloned the
-                // element String and serialised the allocator across threads).
                 let bx = b_atom.x + img_dx;
                 let by = b_atom.y + img_dy;
                 let bz = b_atom.z + img_dz;
-
-                // Fused Coulomb+LJ evaluation so distance is computed once.
                 let (fx, fy, fz) = coulomb_lj_force_raw(
                     a_atom.x, a_atom.y, a_atom.z, a_atom.charge, a_atom.epsilon, a_atom.sigma,
                     bx, by, bz, b_atom.charge, b_atom.epsilon, b_atom.sigma,
                 );
-
-                d.f_i.0 += fx; d.f_i.1 += fy; d.f_i.2 += fz;
-                d.f_j.0 -= fx; d.f_j.1 -= fy; d.f_j.2 -= fz;
-
-                // Atom-atom virial contribution: r_ab . F_on_a (with r_ab
-                // using the minimum-image position of b). Sums to the scalar
-                // virial W used in the virial equation of state,
-                //   P = (2 KE_trans + W) / (3 V).
-                let rdx = a_atom.x - bx;
-                let rdy = a_atom.y - by;
-                let rdz = a_atom.z - bz;
-                d.virial += rdx * fx + rdy * fy + rdz * fz;
-
-                // Torque on A: r_a x F
-                d.t_i.0 += ray * fz - raz * fy;
-                d.t_i.1 += raz * fx - rax * fz;
-                d.t_i.2 += rax * fy - ray * fx;
-
-                // Torque on B: r_b x (-F), where r_b is atom b's offset
-                // from its own center (lever arm is in B's local frame).
-                let rbx = b_atom.x - mol_b.center_x;
-                let rby = b_atom.y - mol_b.center_y;
-                let rbz = b_atom.z - mol_b.center_z;
-                d.t_j.0 += rby * (-fz) - rbz * (-fy);
-                d.t_j.1 += rbz * (-fx) - rbx * (-fz);
-                d.t_j.2 += rbx * (-fy) - rby * (-fx);
+                accumulate_atom_pair!(a_atom, rax, ray, raz, bx, by, bz, b_atom, fx, fy, fz);
             }
 
             // A atom interacting with B's virtual sites (Coulomb only)

@@ -16,23 +16,29 @@ test('serial vs parallel force compute at 125 molecules', async ({ page, context
   await page.waitForTimeout(6000);
   await page.click('#toggle-sim-play'); // pause the render-loop stepping
 
+  // Higher-precision: wall-time-only, run many iters in JS, skip Date.now
+  // rounding inside each bench_* call.
   const result = await page.evaluate(() => {
     const physics = (globalThis as any).__chemsim.physics;
-    const iters = 30;
+    const N_ITERS = 100;
     // Warmup
-    physics.bench_forces_serial();
-    physics.bench_forces_parallel();
-    physics.bench_step_one();
-    let serialTotal = 0;
-    for (let i = 0; i < iters; i++) serialTotal += physics.bench_forces_serial();
-    let parallelTotal = 0;
-    for (let i = 0; i < iters; i++) parallelTotal += physics.bench_forces_parallel();
-    let stepTotal = 0;
-    for (let i = 0; i < iters; i++) stepTotal += physics.bench_step_one();
+    for (let i = 0; i < 5; i++) {
+      physics.bench_forces_serial();
+      physics.bench_forces_parallel();
+    }
+    let t0 = performance.now();
+    for (let i = 0; i < N_ITERS; i++) physics.bench_forces_serial();
+    const serialMs = (performance.now() - t0) / N_ITERS;
+    t0 = performance.now();
+    for (let i = 0; i < N_ITERS; i++) physics.bench_forces_parallel();
+    const parallelMs = (performance.now() - t0) / N_ITERS;
+    t0 = performance.now();
+    for (let i = 0; i < N_ITERS; i++) physics.bench_step_one();
+    const stepMs = (performance.now() - t0) / N_ITERS;
     return {
-      forcesSerialMs: serialTotal / iters,
-      forcesParallelMs: parallelTotal / iters,
-      fullStepMs: stepTotal / iters,
+      forcesSerialMs: serialMs,
+      forcesParallelMs: parallelMs,
+      fullStepMs: stepMs,
       nCores: (navigator as any).hardwareConcurrency,
       n: (globalThis as any).__chemsim.boxMolecules.length,
     };
