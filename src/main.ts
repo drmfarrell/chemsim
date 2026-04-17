@@ -90,14 +90,28 @@ let desiredWorkerCount = 0;
 /// Play again. Falls back to serial cell list while parked (compute
 /// path auto-detects pool_worker_count == 0).
 function matchPoolToRunState(): void {
-  if (!persistent_pool_ready() && desiredWorkerCount === 0) return;
+  if (desiredWorkerCount === 0) return;
   const shouldRun = isSimulationRunning && currentMode === 'mode2' && !document.hidden;
   const alive = persistent_pool_worker_count() > 0;
-  if (shouldRun && !alive && desiredWorkerCount > 0) {
+  if (shouldRun && !alive) {
     init_persistent_pool(desiredWorkerCount);
   } else if (!shouldRun && alive) {
     shutdown_persistent_pool();
   }
+}
+
+/// Single point of truth for sim run-state: flips the bool, updates the
+/// Play/Pause button text + active class, and parks or wakes the worker
+/// pool. Every caller that used to set `isSimulationRunning` directly
+/// should route through here so the UI and pool never drift out of sync.
+function setSimRunning(running: boolean): void {
+  isSimulationRunning = running;
+  const btn = document.getElementById('toggle-sim-play') as HTMLButtonElement | null;
+  if (btn) {
+    btn.textContent = running ? 'Pause' : 'Play';
+    btn.classList.toggle('active', running);
+  }
+  matchPoolToRunState();
 }
 let showInteractionNetwork = false;
 let networkLines: THREE.LineSegments | null = null;
@@ -383,15 +397,9 @@ function setupUI(): void {
     animateSnapToOptimal();
   });
 
-  // Mode 2: Play/Pause
-  document.getElementById('toggle-sim-play')!.addEventListener('click', (e) => {
-    const btn = e.target as HTMLButtonElement;
-    isSimulationRunning = !isSimulationRunning;
-    btn.textContent = isSimulationRunning ? 'Pause' : 'Play';
-    btn.classList.toggle('active', isSimulationRunning);
-    // Park the spin-waiting pool on pause so the laptop's fans stop
-    // screaming; wake it on resume.
-    matchPoolToRunState();
+  // Mode 2: Play/Pause — all UI + pool state change lives in setSimRunning.
+  document.getElementById('toggle-sim-play')!.addEventListener('click', () => {
+    setSimRunning(!isSimulationRunning);
   });
 
   // Also park workers when the tab is backgrounded — no point burning
@@ -1274,7 +1282,7 @@ function addMoleculeToPhysics(data: MoleculeData, cx: number, cy: number, cz: nu
 
 async function loadMode2(moleculeName: string, count: number): Promise<void> {
   const myToken = ++loadToken;
-  isSimulationRunning = false;
+  setSimRunning(false);
 
   try {
     const data = await loadMolecule(moleculeName);
@@ -1416,7 +1424,7 @@ async function loadMode2(moleculeName: string, count: number): Promise<void> {
 
     // Initialize velocities and start simulation
     physics.init_velocities();
-    isSimulationRunning = true;
+    setSimRunning(true);
 
     // Adjust camera to see the box
     sceneManager.camera.position.set(0, 0, boxSize * ANGSTROM_TO_SCENE * 1.2);
@@ -1448,11 +1456,10 @@ function clearMode2(): void {
 
 function switchMode(mode: 'mode1' | 'mode2'): void {
   currentMode = mode;
-  isSimulationRunning = false;
   // Mode change means either (a) we're leaving mode 2 so workers can
   // park, or (b) we're entering mode 2 but Play hasn't been hit yet —
   // either way, the right state is "parked".
-  matchPoolToRunState();
+  setSimRunning(false);
 
   // Clean up both modes
   moleculeA?.dispose();
