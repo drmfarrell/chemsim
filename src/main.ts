@@ -397,15 +397,39 @@ function setupUI(): void {
   // Ship with Fast as the default so classroom demos feel snappy.
   setPreset('fast');
 
-  // Show the effective (post-throttle) multiplier in the stats readout so
-  // users understand why cranking the slider past ~5x at N=64 doesn't help.
+  // Advanced popup: button toggles visibility.
+  const advancedBtn = document.getElementById('advanced-btn') as HTMLButtonElement;
+  const advancedPanel = document.getElementById('advanced-panel') as HTMLDivElement;
+  const advancedClose = document.getElementById('advanced-close') as HTMLButtonElement;
+  const setAdvancedOpen = (open: boolean) => {
+    advancedPanel.style.display = open ? 'block' : 'none';
+  };
+  advancedBtn.addEventListener('click', () => {
+    setAdvancedOpen(advancedPanel.style.display === 'none');
+  });
+  advancedClose.addEventListener('click', () => setAdvancedOpen(false));
+
+  // Main-panel hide/show toggle so students can watch the sim full-screen.
+  const mainPanelToggle = document.getElementById('toggle-main-panel') as HTMLButtonElement;
+  mainPanelToggle.addEventListener('click', () => {
+    const hidden = document.body.classList.toggle('panel-hidden');
+    mainPanelToggle.textContent = hidden ? '▶' : '◀';
+    mainPanelToggle.title = hidden ? 'Show controls' : 'Hide controls';
+  });
+
+  // Speed label shows the *actual* multiplier being applied. When the
+  // auto-throttle caps below the slider value we tag it "capped" and a
+  // tooltip explains why — clearer than exposing an "eff" abbreviation.
   const updateEffectiveSpeed = () => {
     const eff = effectiveSpeedMultiplier;
     const req = simSpeedMultiplier;
     if (Math.abs(eff - req) > 0.1) {
-      speedValue.textContent = `${req} (→${eff.toFixed(1)} eff)`;
+      speedValue.textContent = `${eff.toFixed(1)}× (capped from ${req}×)`;
+      speedValue.title =
+        'Physics can only keep up with a limited number of sim steps per frame at this molecule count. Raising the slider past the cap has no effect; drop the molecule count or pick a faster preset in Advanced to push it higher.';
     } else {
       speedValue.textContent = `${req}`;
+      speedValue.title = '';
     }
   };
   setInterval(updateEffectiveSpeed, 500);
@@ -1196,9 +1220,13 @@ async function loadMode2(moleculeName: string, count: number): Promise<void> {
       moleculeVolume = Math.pow(targetSpacing * Math.cbrt(count), 3);
     }
 
-    // Make box 2x larger than molecule volume - molecules start as a "drop" in center
+    // Size the box with enough headroom around the initial "drop" that a
+    // salt crystal (2x2x2 NaCl unit cells, ~11 A wide, placed ~15% from
+    // center) and its ions have somewhere to dissolve into. 3.2x puts the
+    // box at ~49 A for 125 waters, which keeps the crystal and its dissolved
+    // ions clear of the walls.
     const dropSize = Math.cbrt(moleculeVolume);
-    const boxSize = dropSize * 2.0;
+    const boxSize = dropSize * 3.2;
 
     physics.set_box_size(boxSize);
     physics.set_periodic(false);  // Default to walls (not periodic) - easier to understand
