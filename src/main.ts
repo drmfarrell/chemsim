@@ -14,6 +14,8 @@ import init, {
   init_persistent_pool,
   bench_pool_dispatch,
   persistent_pool_ready,
+  set_persistent_pool_workers,
+  persistent_pool_worker_count,
 } from './wasm-pkg/chemsim_physics';
 
 // Molecule count presets for box mode (perfect cubes for even grid placement)
@@ -105,17 +107,24 @@ async function main() {
   const coi = (globalThis as any).crossOriginIsolated;
   if (coi === true) {
     try {
-      // Use as many threads as the machine advertises (capped at 32 to keep
-      // wasm memory overhead reasonable). Earlier clamp of 8 was leaving
-      // 16+ cores idle on workstation CPUs like Threadripper.
+      // Rayon hosts the persistent workers. Size its pool to the machine's
+      // logical core count (capped at 32 to keep wasm memory reasonable)
+      // so the user can later scale the persistent pool up to that ceiling.
       const nCores = Math.max(2, Math.min(32, navigator.hardwareConcurrency || 4));
       await initThreadPool(nCores);
       console.log(`ChemSim: rayon thread pool initialized with ${nCores} threads`);
-      // Spin up the spin-waiting persistent pool for the hot physics loop.
-      // Using one fewer worker than rayon since the main thread drives
-      // dispatch; this keeps one core free for rendering / JS / GC.
-      init_persistent_pool(Math.max(1, nCores - 1));
-      console.log(`ChemSim: persistent spin-pool ready (${Math.max(1, nCores - 1)} workers)`);
+      // Default persistent pool size leaves 2 cores free (one for the main
+      // thread driving dispatch/render, one breathing room for the OS/UI).
+      // User can override this via the Threads slider in the Advanced panel.
+      const defaultWorkers = Math.max(1, nCores - 2);
+      const storedWorkers = parseInt(
+        localStorage.getItem('chemsim.workers') || String(defaultWorkers),
+      );
+      const workerCount = Math.max(1, Math.min(nCores, storedWorkers));
+      init_persistent_pool(workerCount);
+      console.log(`ChemSim: persistent spin-pool ready (${workerCount} workers, ${nCores} available)`);
+      // Stash for the UI wiring below.
+      (globalThis as any).__chemsim_core_limit = nCores;
     } catch (e) {
       console.warn('ChemSim: failed to initialize rayon thread pool, running single-threaded:', e);
     }
@@ -421,6 +430,35 @@ function setupUI(): void {
 
   // Ship with Fast as the default so classroom demos feel snappy.
   setPreset('fast');
+
+  // Threads slider: lets the user dial the persistent pool up or down
+  // at runtime. Range max is the machine's logical core count; the slider
+  // is hidden if threading never initialized (e.g. plain http over IP).
+  const threadsSlider = document.getElementById('threads-slider') as HTMLInputElement;
+  const threadsValue = document.getElementById('threads-value') as HTMLSpanElement;
+  const threadsMaxLabel = document.getElementById('threads-max-label') as HTMLSpanElement;
+  const coreLimit = ((globalThis as any).__chemsim_core_limit as number) ?? 1;
+  const initialWorkers = persistent_pool_ready() ? persistent_pool_worker_count() : 0;
+  if (initialWorkers === 0) {
+    // No threading available (insecure context or init failed) — hide the
+    // knob so students aren't confused by a dead control.
+    threadsSlider.parentElement!.style.display = 'none';
+  } else {
+    threadsSlider.max = coreLimit.toString();
+    threadsSlider.value = initialWorkers.toString();
+    threadsValue.textContent = initialWorkers.toString();
+    threadsMaxLabel.textContent = `(of ${coreLimit})`;
+    threadsSlider.addEventListener('input', () => {
+      const n = parseInt(threadsSlider.value);
+      threadsValue.textContent = n.toString();
+    });
+    threadsSlider.addEventListener('change', () => {
+      const n = parseInt(threadsSlider.value);
+      set_persistent_pool_workers(n);
+      localStorage.setItem('chemsim.workers', String(n));
+      console.log(`ChemSim: persistent pool resized to ${n} workers`);
+    });
+  }
 
   // Advanced popup: button toggles visibility.
   const advancedBtn = document.getElementById('advanced-btn') as HTMLButtonElement;
@@ -912,23 +950,11 @@ function updateMode2(_dt: number): void {
     let baseSteps = 5;
     if (nMol > 200) baseSteps = 2;
     if (nMol > 400) baseSteps = 1;
-    const requested = baseSteps * simSpeedMultiplier;
-    // Auto-throttle keeps the physics budget under the frame budget so
-    // the tab doesn't stutter. The coefficient (3000) is calibrated for
-    // the persistent-thread-pool era on a ~16-core workstation; it lets
-    // the 50x slider max reach full effect at N <= 343 and throttles
-    // gracefully as N climbs:
-    //   N <= 343  -> slider 50x fits (~250 steps/frame)
-    //   N ~ 512   -> effective ~31x
-    //   N ~ 729   -> effective ~22x
-    //   N ~ 1000  -> effective ~16x
-    const maxStepsPerFrame = nMol <= 27
-      ? 2000
-      : Math.max(5, Math.round((3000 * 27) / nMol));
-    const stepsPerFrame = Math.min(requested, maxStepsPerFrame);
+    // No artificial auto-throttle anymore — if the user cranks the slider
+    // past what the machine can keep up with, frames just drop. Honest.
+    const stepsPerFrame = baseSteps * simSpeedMultiplier;
     physics.step_n(stepsPerFrame);
-    // Expose effective multiplier for the UI readout.
-    effectiveSpeedMultiplier = stepsPerFrame / baseSteps;
+    effectiveSpeedMultiplier = simSpeedMultiplier;
 
     // Resize the wireframe box to match the current physics box (the
     // barostat changes box_size each step). Scaling the existing

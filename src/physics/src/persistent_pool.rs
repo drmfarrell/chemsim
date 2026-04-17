@@ -50,6 +50,14 @@ struct PoolState {
     seq: AtomicU64,
     /// Incremented by each worker once it finishes the current batch.
     done_count: AtomicU64,
+    /// Incremented by each worker when it enters its spin loop. The pool
+    /// constructor spin-waits for this to reach `n_workers` so callers
+    /// never dispatch work to workers that haven't started yet.
+    ready_count: AtomicU64,
+    /// Incremented by each worker when it exits. Shutdown spin-waits for
+    /// this to reach `n_workers` before returning so the `Arc<PoolState>`
+    /// isn't dropped while workers still hold it.
+    exit_count: AtomicU64,
     /// Current work function pointer (thin pointer, 4 bytes on wasm32).
     work_fn: AtomicPtr<()>,
     /// Opaque data pointer handed to each worker.
@@ -83,6 +91,8 @@ impl PersistentPool {
         let state = Arc::new(PoolState {
             seq: AtomicU64::new(0),
             done_count: AtomicU64::new(0),
+            ready_count: AtomicU64::new(0),
+            exit_count: AtomicU64::new(0),
             work_fn: AtomicPtr::new(std::ptr::null_mut()),
             work_data: AtomicPtr::new(std::ptr::null_mut()),
             n_workers,
@@ -91,6 +101,12 @@ impl PersistentPool {
         for id in 0..n_workers {
             let st = Arc::clone(&state);
             rayon::spawn(move || worker_loop(id, st));
+        }
+        // Wait until every worker has actually entered its spin loop so the
+        // caller's first dispatch doesn't hang waiting for a worker that
+        // rayon hasn't scheduled yet.
+        while state.ready_count.load(Ordering::Acquire) < n_workers as u64 {
+            std::hint::spin_loop();
         }
         Self { state }
     }
@@ -129,14 +145,17 @@ impl PersistentPool {
         self.state.n_workers
     }
 
-    /// Signal workers to exit their loops. They drop off rayon's queue
-    /// after the next spin-loop iteration. The pool is unusable after this.
+    /// Signal workers to exit their loops and block until they all actually
+    /// return so the `Arc<PoolState>` isn't dropped while workers still
+    /// dereference it.
     pub fn shutdown(self) {
         self.state.shutdown.store(true, Ordering::Release);
         // Bump seq so workers exit their inner spin and see the shutdown flag.
         self.state.seq.fetch_add(1, Ordering::Release);
-        // No JoinHandles to wait on — rayon tasks simply return, freeing
-        // the worker for later rayon::spawn calls (if any).
+        let n = self.state.n_workers as u64;
+        while self.state.exit_count.load(Ordering::Acquire) < n {
+            std::hint::spin_loop();
+        }
     }
 }
 
@@ -204,6 +223,30 @@ pub fn shutdown_persistent_pool() {
     });
 }
 
+/// Swap the active pool for one with a different worker count. Blocks
+/// until the new pool is fully ready, so callers can dispatch immediately
+/// afterwards without a race window.
+#[wasm_bindgen]
+pub fn set_persistent_pool_workers(n_workers: usize) {
+    // Tear down first so the Arc<PoolState> drops cleanly before we spawn
+    // the new set of rayon tasks.
+    POOL.with(|slot| {
+        if let Some(pool) = slot.borrow_mut().take() {
+            pool.shutdown();
+        }
+    });
+    let n = n_workers.max(1);
+    POOL.with(|slot| {
+        *slot.borrow_mut() = Some(PersistentPool::new(n));
+    });
+}
+
+/// Number of workers in the currently-active pool. Zero if none.
+#[wasm_bindgen]
+pub fn persistent_pool_worker_count() -> usize {
+    POOL.with(|slot| slot.borrow().as_ref().map(|p| p.n_workers()).unwrap_or(0))
+}
+
 /// Run `work_fn` on all workers once and block until every worker reports
 /// done. Intended for internal callers inside this crate — not wasm-exposed.
 ///
@@ -231,12 +274,15 @@ pub fn pool_worker_count() -> usize {
 }
 
 fn worker_loop(id: usize, state: Arc<PoolState>) {
+    // Signal readiness so `PersistentPool::new` knows it's safe to return.
+    state.ready_count.fetch_add(1, Ordering::Release);
     let mut last_seen: u64 = 0;
     loop {
         // Spin until main thread bumps the sequence counter.
         let mut cur = state.seq.load(Ordering::Acquire);
         while cur == last_seen {
             if state.shutdown.load(Ordering::Acquire) {
+                state.exit_count.fetch_add(1, Ordering::Release);
                 return;
             }
             std::hint::spin_loop();
@@ -245,6 +291,7 @@ fn worker_loop(id: usize, state: Arc<PoolState>) {
         last_seen = cur;
 
         if state.shutdown.load(Ordering::Acquire) {
+            state.exit_count.fetch_add(1, Ordering::Release);
             return;
         }
 

@@ -405,7 +405,9 @@
           <input type="range" id="cutoff-slider" min="6" max="14" step="0.5" value="8">
           <label style="margin-top: 6px;" title="Integration timestep. Bigger = faster wall-clock but less stable. Rigid-body rotation caps the safe ceiling around 4 fs.">Timestep: <span id="timestep-value">3.0</span> fs</label>
           <input type="range" id="timestep-slider" min="1" max="4" step="0.5" value="3">
-          <div style="font-size:12px; color:#888; margin-top:6px; line-height:1.4;">Water O-H bonds are already constrained by the rigid-body rotation integrator — no SHAKE pass needed. Cutoff is the biggest perf lever; timestep is the second.</div>
+          <label style="margin-top: 6px;" title="Number of physics worker threads. Default leaves 2 cores free for the OS / UI / rendering. More threads = more force-loop parallelism up to diminishing returns.">Threads: <span id="threads-value">?</span> <span id="threads-max-label" style="color:#888; font-size:12px;"></span></label>
+          <input type="range" id="threads-slider" min="1" max="32" step="1" value="6">
+          <div style="font-size:12px; color:#888; margin-top:6px; line-height:1.4;">Water O-H bonds are already constrained by the rigid-body rotation integrator — no SHAKE pass needed. Cutoff is the biggest perf lever; timestep the second; thread count matters at N &gt; 200.</div>
         </div>
       </div>
 
