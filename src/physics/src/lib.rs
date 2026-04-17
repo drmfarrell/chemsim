@@ -8,6 +8,8 @@ mod thermostat;
 mod deformation;
 mod rotation;
 mod system;
+#[cfg(feature = "parallel")]
+mod persistent_pool;
 
 pub use coulomb::*;
 pub use lennard_jones::*;

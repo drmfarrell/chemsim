@@ -8,7 +8,13 @@ import { loadMolecule, MoleculeData, MOLECULE_LIST } from './utils/loader';
 import { LJ_PARAMS, ANGSTROM_TO_SCENE, DEFAULT_TEMPERATURE, DEFAULT_MOLECULE_COUNT } from './utils/constants';
 import { Tutorial } from './ui/Tutorial';
 import { EXPERIMENTS, Experiment } from './ui/Experiments';
-import init, { SimulationSystem, initThreadPool } from './wasm-pkg/chemsim_physics';
+import init, {
+  SimulationSystem,
+  initThreadPool,
+  init_persistent_pool,
+  bench_pool_dispatch,
+  persistent_pool_ready,
+} from './wasm-pkg/chemsim_physics';
 
 // Molecule count presets for box mode (perfect cubes for even grid placement)
 const MOLECULE_COUNT_PRESETS = [8, 27, 64, 125, 216]; // 2³, 3³, 4³, 5³, 6³ - capped for smooth animation
@@ -102,6 +108,11 @@ async function main() {
       const nCores = Math.max(2, Math.min(8, navigator.hardwareConcurrency || 4));
       await initThreadPool(nCores);
       console.log(`ChemSim: rayon thread pool initialized with ${nCores} threads`);
+      // Spin up the spin-waiting persistent pool for the hot physics loop.
+      // Using one fewer worker than rayon since the main thread drives
+      // dispatch; this keeps one core free for rendering / JS / GC.
+      init_persistent_pool(Math.max(1, nCores - 1));
+      console.log(`ChemSim: persistent spin-pool ready (${Math.max(1, nCores - 1)} workers)`);
     } catch (e) {
       console.warn('ChemSim: failed to initialize rayon thread pool, running single-threaded:', e);
     }
@@ -120,6 +131,17 @@ async function main() {
       physics.step_n(nSteps);
       const ms = performance.now() - t0;
       return { ms, stepsPerSec: (nSteps / ms) * 1000, molCount: boxMolecules.length };
+    },
+    // Measure persistent-pool dispatch latency. Compare against rayon's
+    // ~1-2 ms per par_iter. Target: <100 us.
+    benchPoolDispatch(nIters: number) {
+      if (!persistent_pool_ready()) return { error: 'persistent pool not initialized' };
+      const totalMs = bench_pool_dispatch(nIters);
+      return {
+        totalMs,
+        perDispatchUs: (totalMs / nIters) * 1000,
+        nIters,
+      };
     },
   };
 

@@ -947,29 +947,17 @@ impl SimulationSystem {
         let mut virial = 0.0;
         let cutoff2 = self.cutoff * self.cutoff;
 
-        // Dispatch strategy (both periodic and solid-walls modes):
-        //   N <= 30   -> serial brute force (cell list / rayon overhead win).
-        //   30 < N <= PARALLEL_THRESHOLD -> serial cell list (fastest at
-        //     small N because it avoids wasm-bindgen-rayon's per-call Atomics
-        //     wake/sleep cost of ~1-2ms).
-        //   N > PARALLEL_THRESHOLD -> parallel cell list.
-        // compute_pair_force already respects `use_periodic` when deciding
-        // whether to apply minimum-image wrapping, so the cell-list neighbor
-        // walk's `rem_euclid` is harmless in solid-walls mode: out-of-range
-        // pairs fail the cutoff check and return None.
-        const PARALLEL_THRESHOLD: usize = 200;
+        // Dispatch: always use the parallel path when the persistent pool
+        // is up (dispatch latency is ~10us, so parallel wins at N well
+        // below the old rayon-era threshold of 200). Fall back to serial
+        // cell list if the pool isn't initialized yet, or to brute force
+        // for tiny systems where a cell list isn't worth building.
         if n > 30 {
             #[cfg(feature = "parallel")]
             {
-                if n > PARALLEL_THRESHOLD {
-                    self.compute_forces_cell_list_parallel(
-                        &mut forces, &mut torques, &mut virial, cutoff2,
-                    );
-                } else {
-                    self.compute_forces_cell_list(
-                        &mut forces, &mut torques, &mut virial, cutoff2,
-                    );
-                }
+                self.compute_forces_cell_list_parallel(
+                    &mut forces, &mut torques, &mut virial, cutoff2,
+                );
             }
             #[cfg(not(feature = "parallel"))]
             {
@@ -1101,16 +1089,19 @@ impl SimulationSystem {
         }
     }
 
-    /// Parallel force computation using per-molecule accumulation (no
-    /// `.collect()` allocation in the hot path). Each molecule's total force
-    /// is computed independently using a cell-list to bound work, and each
-    /// rayon task writes only to *its own* output slot (`par_iter_mut`), so
-    /// there's no locking, no reduction, no intermediate `Vec`s.
+    /// Parallel force computation using the persistent spin-wait worker
+    /// pool (see `persistent_pool.rs`). Each worker gets a contiguous
+    /// range of molecule indices and computes the full (not half-shell)
+    /// force on each of its molecules by walking the 27-cell neighborhood.
+    /// Output is a per-molecule `(fx, fy, fz, tx, ty, tz, virial_half)`
+    /// tuple — adjacent writes land in adjacent `accum` slots, so no two
+    /// workers alias.
     ///
-    /// Trade-off vs. a half-shell Newton-3 approach: we compute each pair
-    /// twice (once for each side), doubling the raw pair-force work. But with
-    /// 8 threads and zero allocation overhead, this wins on wasm where the
-    /// real bottleneck is allocator contention, not pair-force math.
+    /// Versus the earlier rayon `par_iter_mut` version: no Atomics.wait /
+    /// notify cycle on dispatch. The pool workers spin on a shared
+    /// sequence counter, so per-dispatch latency drops from ~1-2 ms to
+    /// ~10 us. Trade-off: workers burn 100% CPU whenever the sim is
+    /// running.
     #[cfg(feature = "parallel")]
     fn compute_forces_cell_list_parallel(
         &self,
@@ -1119,7 +1110,6 @@ impl SimulationSystem {
         virial: &mut f64,
         cutoff2: f64,
     ) {
-        use rayon::prelude::*;
         let n = self.molecules.len();
         let cell_size = self.cutoff;
         let n_cells = ((self.box_size / cell_size).ceil() as usize).max(1);
@@ -1148,67 +1138,127 @@ impl SimulationSystem {
             cx * n_cells * n_cells + cy * n_cells + cz
         }).collect();
 
-        // Per-molecule parallel. Each thread owns one output slot and writes
-        // only there — no coordination, no collect, no fold/reduce.
-        // The output tuple is packed as (fx, fy, fz, tx, ty, tz, virial_half).
+        // Per-molecule output. (fx, fy, fz, tx, ty, tz, virial_half). Each
+        // worker writes to its assigned [start, end) slice, so no aliasing.
         let mut accum: Vec<(f64, f64, f64, f64, f64, f64, f64)> =
             vec![(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0); n];
 
-        let use_periodic = self.use_periodic;
-        let ncells_i = n_cells as i32;
-        accum.par_iter_mut().enumerate().for_each(|(i, out)| {
-            // Walk the 27 neighboring cells of i's cell (full shell, not
-            // half, since each molecule accumulates its own total force).
-            let my_cell = mol_cell[i];
-            let cx = my_cell / (n_cells * n_cells);
-            let cy = (my_cell / n_cells) % n_cells;
-            let cz = my_cell % n_cells;
-            for dcx in -1_i32..=1 {
-                for dcy in -1_i32..=1 {
-                    for dcz in -1_i32..=1 {
-                        let rx = cx as i32 + dcx;
-                        let ry = cy as i32 + dcy;
-                        let rz = cz as i32 + dcz;
-                        // Skip out-of-bounds neighbors when walls are on,
-                        // wrap around when boundaries are periodic.
-                        let (nx, ny, nz) = if use_periodic {
-                            (
-                                rx.rem_euclid(ncells_i) as usize,
-                                ry.rem_euclid(ncells_i) as usize,
-                                rz.rem_euclid(ncells_i) as usize,
-                            )
-                        } else {
-                            if rx < 0 || rx >= ncells_i || ry < 0 || ry >= ncells_i
-                                || rz < 0 || rz >= ncells_i { continue; }
-                            (rx as usize, ry as usize, rz as usize)
-                        };
-                        let nc = nx * n_cells * n_cells + ny * n_cells + nz;
-                        for &j in &cells[nc] {
-                            if i == j { continue; }
-                            // compute_pair_force returns deltas assuming i<j
-                            // (d.f_i for the lower index). Feed ordered pair
-                            // but pick the correct side for molecule i.
-                            let (lo, hi) = if i < j { (i, j) } else { (j, i) };
-                            if let Some(d) = self.compute_pair_force(lo, hi, cutoff2) {
-                                let (fx, fy, fz, tx, ty, tz) = if i < j {
-                                    (d.f_i.0, d.f_i.1, d.f_i.2, d.t_i.0, d.t_i.1, d.t_i.2)
-                                } else {
-                                    (d.f_j.0, d.f_j.1, d.f_j.2, d.t_j.0, d.t_j.1, d.t_j.2)
-                                };
-                                out.0 += fx; out.1 += fy; out.2 += fz;
-                                out.3 += tx; out.4 += ty; out.5 += tz;
-                                // Each pair contributes virial twice (once per
-                                // endpoint), so halve to avoid double-counting
-                                // after the serial sum below.
-                                out.6 += d.virial * 0.5;
+        // Fall back to serial cell-list if the pool isn't up yet (e.g.,
+        // during early init before `init_persistent_pool` has run).
+        let n_workers = crate::persistent_pool::pool_worker_count();
+        if n_workers == 0 {
+            self.compute_forces_cell_list(forces, torques, virial, cutoff2);
+            return;
+        }
+
+        // Pack everything the workers need into a single struct and pass
+        // its address through the pool's opaque work pointer. All fields
+        // are read-only except `accum_ptr`, which workers slice by id.
+        #[repr(C)]
+        struct ForceWorkDesc {
+            sim: *const SimulationSystem,
+            cells: *const Vec<Vec<usize>>,
+            mol_cell: *const Vec<usize>,
+            accum_ptr: *mut (f64, f64, f64, f64, f64, f64, f64),
+            n_molecules: usize,
+            n_cells: usize,
+            cutoff2: f64,
+            n_workers: usize,
+        }
+
+        let desc = ForceWorkDesc {
+            sim: self,
+            cells: &cells,
+            mol_cell: &mol_cell,
+            accum_ptr: accum.as_mut_ptr(),
+            n_molecules: n,
+            n_cells,
+            cutoff2,
+            n_workers,
+        };
+
+        unsafe extern "Rust" fn force_worker(data: *const u8, id: usize) {
+            let desc = &*(data as *const ForceWorkDesc);
+            let sim = &*desc.sim;
+            let cells = &*desc.cells;
+            let mol_cell = &*desc.mol_cell;
+            let n = desc.n_molecules;
+            let n_cells = desc.n_cells;
+            let ncells_i = n_cells as i32;
+            let use_periodic = sim.use_periodic;
+
+            // Split [0, n) evenly across workers; last worker mops up the
+            // remainder from the ceil division.
+            let chunk = n.div_ceil(desc.n_workers);
+            let start = id * chunk;
+            let end = ((id + 1) * chunk).min(n);
+
+            for i in start..end {
+                let my_cell = mol_cell[i];
+                let cx = my_cell / (n_cells * n_cells);
+                let cy = (my_cell / n_cells) % n_cells;
+                let cz = my_cell % n_cells;
+
+                let mut out = (0.0f64, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+
+                for dcx in -1_i32..=1 {
+                    for dcy in -1_i32..=1 {
+                        for dcz in -1_i32..=1 {
+                            let rx = cx as i32 + dcx;
+                            let ry = cy as i32 + dcy;
+                            let rz = cz as i32 + dcz;
+                            let (nx, ny, nz) = if use_periodic {
+                                (
+                                    rx.rem_euclid(ncells_i) as usize,
+                                    ry.rem_euclid(ncells_i) as usize,
+                                    rz.rem_euclid(ncells_i) as usize,
+                                )
+                            } else {
+                                if rx < 0 || rx >= ncells_i || ry < 0 || ry >= ncells_i
+                                    || rz < 0 || rz >= ncells_i
+                                {
+                                    continue;
+                                }
+                                (rx as usize, ry as usize, rz as usize)
+                            };
+                            let nc = nx * n_cells * n_cells + ny * n_cells + nz;
+                            for &j in &cells[nc] {
+                                if i == j {
+                                    continue;
+                                }
+                                let (lo, hi) = if i < j { (i, j) } else { (j, i) };
+                                if let Some(d) = sim.compute_pair_force(lo, hi, desc.cutoff2) {
+                                    let (fx, fy, fz, tx, ty, tz) = if i < j {
+                                        (d.f_i.0, d.f_i.1, d.f_i.2, d.t_i.0, d.t_i.1, d.t_i.2)
+                                    } else {
+                                        (d.f_j.0, d.f_j.1, d.f_j.2, d.t_j.0, d.t_j.1, d.t_j.2)
+                                    };
+                                    out.0 += fx; out.1 += fy; out.2 += fz;
+                                    out.3 += tx; out.4 += ty; out.5 += tz;
+                                    out.6 += d.virial * 0.5;
+                                }
                             }
                         }
                     }
                 }
+                // Workers only ever write to their own disjoint indices.
+                unsafe { *desc.accum_ptr.add(i) = out };
             }
-        });
+        }
 
-        // Serial sum into caller's buffers. No alloc, tiny work.
+        // SAFETY: `desc` lives on this stack frame; `dispatch_global`
+        // blocks until all workers are done, so `desc` and everything it
+        // points to (self, cells, mol_cell, accum) are guaranteed alive
+        // throughout. Workers only call &self methods (no mutation) and
+        // write to disjoint `accum[i]` slots.
+        unsafe {
+            crate::persistent_pool::dispatch_global(
+                force_worker,
+                &desc as *const _ as *const u8,
+            );
+        }
+
+        // Serial sum into caller's buffers.
         for i in 0..n {
             let a = accum[i];
             forces[i].0 += a.0; forces[i].1 += a.1; forces[i].2 += a.2;
