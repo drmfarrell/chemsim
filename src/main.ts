@@ -338,6 +338,65 @@ function setupUI(): void {
     speedValue.textContent = speedSlider.value;
   });
 
+  // Advanced panel: precision presets + cutoff/timestep sliders.
+  // Ships with Fast defaults so students see dissolution happen in minutes
+  // of wall-clock time. Toggling Precise roughly halves wall-clock speed
+  // but better conserves energy for measurements.
+  const cutoffSlider = document.getElementById('cutoff-slider') as HTMLInputElement;
+  const cutoffValue = document.getElementById('cutoff-value') as HTMLSpanElement;
+  const timestepSlider = document.getElementById('timestep-slider') as HTMLInputElement;
+  const timestepValue = document.getElementById('timestep-value') as HTMLSpanElement;
+  const presetFast = document.getElementById('preset-fast') as HTMLButtonElement;
+  const presetBal = document.getElementById('preset-balanced') as HTMLButtonElement;
+  const presetPrecise = document.getElementById('preset-precise') as HTMLButtonElement;
+
+  const applyCutoff = (v: number) => {
+    physics.set_cutoff(v);
+    cutoffSlider.value = v.toString();
+    cutoffValue.textContent = v.toFixed(1);
+  };
+  const applyTimestep = (fs: number) => {
+    // Slider is in fs for legibility; the physics API takes ps.
+    physics.set_timestep(fs / 1000);
+    timestepSlider.value = fs.toString();
+    timestepValue.textContent = fs.toFixed(1);
+  };
+  const setPreset = (which: 'fast' | 'balanced' | 'precise') => {
+    for (const b of [presetFast, presetBal, presetPrecise]) b.classList.remove('active');
+    if (which === 'fast') {
+      presetFast.classList.add('active');
+      applyCutoff(8.0);
+      applyTimestep(3.0);
+    } else if (which === 'balanced') {
+      presetBal.classList.add('active');
+      applyCutoff(10.0);
+      applyTimestep(2.0);
+    } else {
+      presetPrecise.classList.add('active');
+      applyCutoff(12.0);
+      applyTimestep(1.5);
+    }
+  };
+  presetFast.addEventListener('click', () => setPreset('fast'));
+  presetBal.addEventListener('click', () => setPreset('balanced'));
+  presetPrecise.addEventListener('click', () => setPreset('precise'));
+
+  // Manual slider drags drop out of any preset active state.
+  const clearPresetActive = () => {
+    for (const b of [presetFast, presetBal, presetPrecise]) b.classList.remove('active');
+  };
+  cutoffSlider.addEventListener('input', () => {
+    applyCutoff(parseFloat(cutoffSlider.value));
+    clearPresetActive();
+  });
+  timestepSlider.addEventListener('input', () => {
+    applyTimestep(parseFloat(timestepSlider.value));
+    clearPresetActive();
+  });
+
+  // Ship with Fast as the default so classroom demos feel snappy.
+  setPreset('fast');
+
   // Show the effective (post-throttle) multiplier in the stats readout so
   // users understand why cranking the slider past ~5x at N=64 doesn't help.
   const updateEffectiveSpeed = () => {

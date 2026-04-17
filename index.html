@@ -327,6 +327,23 @@
           <label style="margin-top: 8px;">Target Pressure: <span id="pressure-target-value">1</span> bar</label>
           <input type="range" id="pressure-target-slider" min="0.1" max="50" step="0.1" value="1">
           <button id="add-salt-btn" style="margin-top: 8px;">Add Salt Crystal</button>
+
+          <details id="advanced-panel" style="margin-top: 10px;">
+            <summary style="cursor:pointer; font-size:14px; color:#aaa; text-transform: uppercase; letter-spacing: 0.5px; padding: 4px 0;">Advanced</summary>
+            <div class="control-group" style="margin-top: 6px;">
+              <label>Precision</label>
+              <div class="toggle-row">
+                <button class="toggle-btn active" id="preset-fast" title="Short cutoff + large timestep: fastest, lowest accuracy. Good for watching dissolution.">Fast</button>
+                <button class="toggle-btn" id="preset-balanced" title="Middle ground: ~2x faster than precise with most of the accuracy.">Balanced</button>
+                <button class="toggle-btn" id="preset-precise" title="Long cutoff + small timestep: slowest, highest accuracy. Good for measurements.">Precise</button>
+              </div>
+              <label style="margin-top: 8px;" title="Interaction cutoff distance. Shorter = fewer pairs = faster but ignores longer-range Coulomb.">Cutoff: <span id="cutoff-value">8.0</span> Å</label>
+              <input type="range" id="cutoff-slider" min="6" max="14" step="0.5" value="8">
+              <label style="margin-top: 4px;" title="Integration timestep. Bigger = faster wall-clock but less stable. Water is modeled as fully rigid (quaternion rotation), which fills the role of SHAKE bond constraints and lets us push up to ~4 fs without exploding.">Timestep: <span id="timestep-value">3.0</span> fs</label>
+              <input type="range" id="timestep-slider" min="1" max="4" step="0.5" value="3">
+              <div style="font-size:12px; color:#777; margin-top:4px; line-height:1.3;">Water O-H bonds are already constrained by the rigid-body rotation integrator — no SHAKE pass needed. Cutoff is the biggest perf lever; timestep the second.</div>
+            </div>
+          </details>
         </div>
       </div>
 
