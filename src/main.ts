@@ -66,6 +66,9 @@ function updateBoxAppearance(hasWalls: boolean): void {
 
 let isSimulationRunning = false;
 let simSpeedMultiplier = 1;
+// Effective multiplier after the N-based auto-throttle. Equals
+// simSpeedMultiplier at small N; capped for larger systems.
+let effectiveSpeedMultiplier = 1;
 let showInteractionNetwork = false;
 let networkLines: THREE.LineSegments | null = null;
 let statsUpdateCounter = 0;
@@ -334,6 +337,19 @@ function setupUI(): void {
     simSpeedMultiplier = parseInt(speedSlider.value);
     speedValue.textContent = speedSlider.value;
   });
+
+  // Show the effective (post-throttle) multiplier in the stats readout so
+  // users understand why cranking the slider past ~5x at N=64 doesn't help.
+  const updateEffectiveSpeed = () => {
+    const eff = effectiveSpeedMultiplier;
+    const req = simSpeedMultiplier;
+    if (Math.abs(eff - req) > 0.1) {
+      speedValue.textContent = `${req} (→${eff.toFixed(1)} eff)`;
+    } else {
+      speedValue.textContent = `${req}`;
+    }
+  };
+  setInterval(updateEffectiveSpeed, 500);
 
   // Mode 2: Barostat toggle + target pressure slider
   document.getElementById('toggle-barostat')!.addEventListener('click', (e) => {
@@ -788,8 +804,20 @@ function updateMode2(_dt: number): void {
     let baseSteps = 5;
     if (nMol > 200) baseSteps = 2;
     if (nMol > 400) baseSteps = 1;
-    const stepsPerFrame = baseSteps * simSpeedMultiplier;
+    const requested = baseSteps * simSpeedMultiplier;
+    // Auto-throttle: physics cost scales ~quadratically with N, so the same
+    // speed multiplier that feels snappy at N=27 can crawl the browser at
+    // N=64+. Cap steps-per-frame so the main thread stays under ~20ms of
+    // physics per frame (keeping render ~30+ FPS). The effective multiplier
+    // is then min(slider, cap). Calibration: N=27 allows 100 steps/frame
+    // (20x * 5 base), N=64 caps ~42 steps/frame, N=128 caps ~21.
+    const maxStepsPerFrame = nMol <= 27
+      ? 100
+      : Math.max(5, Math.round((100 * 27) / nMol));
+    const stepsPerFrame = Math.min(requested, maxStepsPerFrame);
     physics.step_n(stepsPerFrame);
+    // Expose effective multiplier for the UI readout.
+    effectiveSpeedMultiplier = stepsPerFrame / baseSteps;
 
     // Resize the wireframe box to match the current physics box (the
     // barostat changes box_size each step). Scaling the existing
