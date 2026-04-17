@@ -2,7 +2,7 @@ use wasm_bindgen::prelude::*;
 use serde::{Deserialize, Serialize};
 use crate::{Atom, Molecule, InteractionResult, VirtualSite};
 use crate::coulomb::{coulomb_energy, coulomb_force, coulomb_force_raw, electric_field_at};
-use crate::lennard_jones::{lj_energy, lj_force, lj_force_raw};
+use crate::lennard_jones::{lj_energy, lj_force, lj_force_raw, coulomb_lj_force_raw};
 use crate::integrator::{verlet_position_step, verlet_velocity_step, kinetic_energy, compute_temperature};
 use crate::thermostat::{berendsen_thermostat, initialize_velocities};
 use crate::deformation::compute_cloud_deformation_flat;
@@ -902,31 +902,36 @@ impl SimulationSystem {
         let mut virial = 0.0;
         let cutoff2 = self.cutoff * self.cutoff;
 
-        // Always take the parallel path when the feature is on, regardless of
-        // whether periodic boundaries are in use. The previous `self.use_periodic`
-        // guard silently downgraded Solid-Walls mode to serial O(N^2) brute
-        // force, which is where the user's "only one core busy" report came
-        // from. The parallel path uses the cell list with wrap-around, but the
-        // per-molecule accumulation only aggregates pairs within cutoff, so
-        // non-periodic physics is unaffected (forces from the wrapped images
-        // are zero at cutoff in a box larger than 2*cutoff).
-        #[cfg(feature = "parallel")]
-        {
-            if n > 30 {
-                self.compute_forces_cell_list_parallel(
-                    &mut forces, &mut torques, &mut virial, cutoff2,
-                );
-            } else {
-                self.compute_forces_brute(&mut forces, &mut torques, &mut virial, cutoff2);
+        // Dispatch strategy (both periodic and solid-walls modes):
+        //   N <= 30   -> serial brute force (cell list / rayon overhead win).
+        //   30 < N <= PARALLEL_THRESHOLD -> serial cell list (fastest at
+        //     small N because it avoids wasm-bindgen-rayon's per-call Atomics
+        //     wake/sleep cost of ~1-2ms).
+        //   N > PARALLEL_THRESHOLD -> parallel cell list.
+        // compute_pair_force already respects `use_periodic` when deciding
+        // whether to apply minimum-image wrapping, so the cell-list neighbor
+        // walk's `rem_euclid` is harmless in solid-walls mode: out-of-range
+        // pairs fail the cutoff check and return None.
+        const PARALLEL_THRESHOLD: usize = 200;
+        if n > 30 {
+            #[cfg(feature = "parallel")]
+            {
+                if n > PARALLEL_THRESHOLD {
+                    self.compute_forces_cell_list_parallel(
+                        &mut forces, &mut torques, &mut virial, cutoff2,
+                    );
+                } else {
+                    self.compute_forces_cell_list(
+                        &mut forces, &mut torques, &mut virial, cutoff2,
+                    );
+                }
             }
-        }
-        #[cfg(not(feature = "parallel"))]
-        {
-            if n > 30 && self.use_periodic {
+            #[cfg(not(feature = "parallel"))]
+            {
                 self.compute_forces_cell_list(&mut forces, &mut torques, &mut virial, cutoff2);
-            } else {
-                self.compute_forces_brute(&mut forces, &mut torques, &mut virial, cutoff2);
             }
+        } else {
+            self.compute_forces_brute(&mut forces, &mut torques, &mut virial, cutoff2);
         }
 
         // Cap per-molecule force magnitude to prevent the integrator from
@@ -1243,18 +1248,11 @@ impl SimulationSystem {
                 let by = b_atom.y + img_dy;
                 let bz = b_atom.z + img_dz;
 
-                let (cfx, cfy, cfz) = coulomb_force_raw(
-                    a_atom.x, a_atom.y, a_atom.z, a_atom.charge,
-                    bx, by, bz, b_atom.charge,
+                // Fused Coulomb+LJ evaluation so distance is computed once.
+                let (fx, fy, fz) = coulomb_lj_force_raw(
+                    a_atom.x, a_atom.y, a_atom.z, a_atom.charge, a_atom.epsilon, a_atom.sigma,
+                    bx, by, bz, b_atom.charge, b_atom.epsilon, b_atom.sigma,
                 );
-                let (lfx, lfy, lfz) = lj_force_raw(
-                    a_atom.x, a_atom.y, a_atom.z, a_atom.epsilon, a_atom.sigma,
-                    bx, by, bz, b_atom.epsilon, b_atom.sigma,
-                );
-
-                let fx = cfx + lfx;
-                let fy = cfy + lfy;
-                let fz = cfz + lfz;
 
                 d.f_i.0 += fx; d.f_i.1 += fy; d.f_i.2 += fz;
                 d.f_j.0 -= fx; d.f_j.1 -= fy; d.f_j.2 -= fz;
