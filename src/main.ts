@@ -105,7 +105,10 @@ async function main() {
   const coi = (globalThis as any).crossOriginIsolated;
   if (coi === true) {
     try {
-      const nCores = Math.max(2, Math.min(8, navigator.hardwareConcurrency || 4));
+      // Use as many threads as the machine advertises (capped at 32 to keep
+      // wasm memory overhead reasonable). Earlier clamp of 8 was leaving
+      // 16+ cores idle on workstation CPUs like Threadripper.
+      const nCores = Math.max(2, Math.min(32, navigator.hardwareConcurrency || 4));
       await initThreadPool(nCores);
       console.log(`ChemSim: rayon thread pool initialized with ${nCores} threads`);
       // Spin up the spin-waiting persistent pool for the hot physics loop.
@@ -910,19 +913,18 @@ function updateMode2(_dt: number): void {
     if (nMol > 200) baseSteps = 2;
     if (nMol > 400) baseSteps = 1;
     const requested = baseSteps * simSpeedMultiplier;
-    // Auto-throttle: physics cost scales ~linearly with N (cell list),
-    // but we pay the cost once per frame, so keep wall-clock within a
-    // ~30 FPS budget. Calibration factor 800 accounts for the persistent-
-    // thread speedup (~8x on the physics critical path) compared to the
-    // earlier single-thread cap of 100.
-    //   N <= 216   -> no cap (full 20x slider = 100 steps/frame fits)
-    //   N ~ 343    -> ~12x effective cap
-    //   N ~ 512    -> ~8x
-    //   N ~ 729    -> ~6x
-    //   N ~ 1000   -> ~4x
+    // Auto-throttle keeps the physics budget under the frame budget so
+    // the tab doesn't stutter. The coefficient (3000) is calibrated for
+    // the persistent-thread-pool era on a ~16-core workstation; it lets
+    // the 50x slider max reach full effect at N <= 343 and throttles
+    // gracefully as N climbs:
+    //   N <= 343  -> slider 50x fits (~250 steps/frame)
+    //   N ~ 512   -> effective ~31x
+    //   N ~ 729   -> effective ~22x
+    //   N ~ 1000  -> effective ~16x
     const maxStepsPerFrame = nMol <= 27
-      ? 1000
-      : Math.max(5, Math.round((800 * 27) / nMol));
+      ? 2000
+      : Math.max(5, Math.round((3000 * 27) / nMol));
     const stepsPerFrame = Math.min(requested, maxStepsPerFrame);
     physics.step_n(stepsPerFrame);
     // Expose effective multiplier for the UI readout.
