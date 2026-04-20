@@ -85,16 +85,12 @@ fn build_molecule(atoms_data: &[(&str, f64, f64, f64, f64)]) -> Molecule {
         .collect();
     let mut mol = Molecule {
         atoms,
-        center_x: 0.0, center_y: 0.0, center_z: 0.0,
-        vx: 0.0, vy: 0.0, vz: 0.0,
         polarizability: 1.45,
-        body_coords: Vec::new(),
-        q: (1.0, 0.0, 0.0, 0.0),
-        omega_body: (0.0, 0.0, 0.0),
-        inertia: (1.0, 1.0, 1.0),
+        ..Molecule::default()
     };
     mol.compute_center();
     mol.init_rigid_body();
+    mol.sync_soa();
     mol
 }
 

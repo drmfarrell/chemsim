@@ -1061,8 +1061,12 @@ impl SimulationSystem {
                         }
                     }
 
-                    // Inter-cell pairs with forward neighbors (half-shell for periodic)
-                    // Only check 13 forward neighbors to avoid double-counting
+                    // Inter-cell pairs with forward neighbors (half-shell for periodic).
+                    // The forward walk alone would visit each pair once, but with small
+                    // n_cells the periodic wrap (rem_euclid) can make the forward shell
+                    // revisit `cell_idx` itself — so we also need an `i < j` guard to
+                    // stop the same molecule pair from being counted twice when the
+                    // neighbor cell wraps back onto the home cell.
                     for dcx in 0..=1_i32 {
                         let start_cy = if dcx == 0 { 0 } else { -1_i32 };
                         for dcy in start_cy..=1_i32 {
@@ -1073,9 +1077,9 @@ impl SimulationSystem {
                                 let nz = (cz as i32 + dcz).rem_euclid(n_cells as i32) as usize;
                                 let neighbor_idx = nx * n_cells * n_cells + ny * n_cells + nz;
 
-                                // Compute forces between all pairs in cell_idx and neighbor_idx
                                 for &i in &cells[cell_idx] {
                                     for &j in &cells[neighbor_idx] {
+                                        if i >= j { continue; }
                                         if let Some(d) = self.compute_pair_force(i, j, cutoff2) {
                                             apply_pair(&d, i, j, forces, torques, virial);
                                         }
@@ -1201,6 +1205,14 @@ impl SimulationSystem {
 
                 let mut out = (0.0f64, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
 
+                // Collect the 27-cell neighborhood's cell indices, then
+                // dedupe. Under periodic BCs with small `n_cells` (box ~=
+                // cutoff) several (dcx, dcy, dcz) triples wrap onto the
+                // same physical cell; without dedup the same neighbor
+                // molecule would be counted multiple times, since
+                // compute_pair_force applies minimum-image internally.
+                let mut neighbor_cells = [0usize; 27];
+                let mut n_neighbor = 0usize;
                 for dcx in -1_i32..=1 {
                     for dcy in -1_i32..=1 {
                         for dcz in -1_i32..=1 {
@@ -1222,22 +1234,33 @@ impl SimulationSystem {
                                 (rx as usize, ry as usize, rz as usize)
                             };
                             let nc = nx * n_cells * n_cells + ny * n_cells + nz;
-                            for &j in &cells[nc] {
-                                if i == j {
-                                    continue;
-                                }
-                                let (lo, hi) = if i < j { (i, j) } else { (j, i) };
-                                if let Some(d) = sim.compute_pair_force(lo, hi, desc.cutoff2) {
-                                    let (fx, fy, fz, tx, ty, tz) = if i < j {
-                                        (d.f_i.0, d.f_i.1, d.f_i.2, d.t_i.0, d.t_i.1, d.t_i.2)
-                                    } else {
-                                        (d.f_j.0, d.f_j.1, d.f_j.2, d.t_j.0, d.t_j.1, d.t_j.2)
-                                    };
-                                    out.0 += fx; out.1 += fy; out.2 += fz;
-                                    out.3 += tx; out.4 += ty; out.5 += tz;
-                                    out.6 += d.virial * 0.5;
-                                }
+                            let mut seen = false;
+                            for k in 0..n_neighbor {
+                                if neighbor_cells[k] == nc { seen = true; break; }
                             }
+                            if !seen {
+                                neighbor_cells[n_neighbor] = nc;
+                                n_neighbor += 1;
+                            }
+                        }
+                    }
+                }
+                for k in 0..n_neighbor {
+                    let nc = neighbor_cells[k];
+                    for &j in &cells[nc] {
+                        if i == j {
+                            continue;
+                        }
+                        let (lo, hi) = if i < j { (i, j) } else { (j, i) };
+                        if let Some(d) = sim.compute_pair_force(lo, hi, desc.cutoff2) {
+                            let (fx, fy, fz, tx, ty, tz) = if i < j {
+                                (d.f_i.0, d.f_i.1, d.f_i.2, d.t_i.0, d.t_i.1, d.t_i.2)
+                            } else {
+                                (d.f_j.0, d.f_j.1, d.f_j.2, d.t_j.0, d.t_j.1, d.t_j.2)
+                            };
+                            out.0 += fx; out.1 += fy; out.2 += fz;
+                            out.3 += tx; out.4 += ty; out.5 += tz;
+                            out.6 += d.virial * 0.5;
                         }
                     }
                 }
