@@ -1833,6 +1833,9 @@ function clearMode2(): void {
   boxMolecules = [];
   seedTinted.clear();
   autoFreezePsAccum = 0;
+  // Old history is meaningless once the box changes species, count,
+  // or is re-seeded — wipe it so the graph restarts cleanly.
+  graphHistory = [];
 
   if (boxHelper) {
     sceneManager.scene.remove(boxHelper);
