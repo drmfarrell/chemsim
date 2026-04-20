@@ -238,7 +238,7 @@ impl SimulationSystem {
     /// descend.
     ///
     /// Returns the number of molecules newly frozen this call.
-    pub fn auto_freeze_near_frozen(&mut self, max_per_call: u32) -> u32 {
+    pub fn auto_freeze_near_frozen(&mut self, max_per_call: u32, max_omega: f64) -> u32 {
         // Collect frozen atom positions by element.
         let mut frozen_o: Vec<(f64, f64, f64)> = Vec::new();
         let mut frozen_h: Vec<(f64, f64, f64)> = Vec::new();
@@ -303,8 +303,15 @@ impl SimulationSystem {
             }
             if !h_bonded { continue; }
 
+            // 3. Quietness gate: water must be tumbling slowly enough
+            //    that we believe it's settled into the H-bond network
+            //    rather than just glancing past the crystal. Keeps hot,
+            //    transient close-passes from getting snap-frozen.
             let (wx, wy, wz) = mol.omega_body;
-            candidates.push((i, wx * wx + wy * wy + wz * wz));
+            let omega2 = wx * wx + wy * wy + wz * wz;
+            if omega2 > max_omega * max_omega { continue; }
+
+            candidates.push((i, omega2));
         }
 
         // Quietest first — these are the waters most "settled into" the
@@ -320,6 +327,23 @@ impl SimulationSystem {
             mol.omega_body = (0.0, 0.0, 0.0);
         }
         self.forces_valid = false;
+        n
+    }
+
+    /// Unfreeze every currently-frozen molecule. Used when the target
+    /// temperature rises above the water model's melting point —
+    /// frozen waters are otherwise invisible to the thermostat, so
+    /// they'd stay rigid forever even at 400 K without this escape
+    /// hatch. Returns the number of molecules that went back into
+    /// normal dynamics.
+    pub fn unfreeze_all_frozen(&mut self) -> u32 {
+        let mut n = 0;
+        for mol in self.molecules.iter_mut() {
+            if mol.is_frozen {
+                mol.is_frozen = false;
+                n += 1;
+            }
+        }
         n
     }
 

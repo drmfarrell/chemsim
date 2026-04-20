@@ -83,6 +83,12 @@ const seedTinted: Set<number> = new Set();
 let autoFreezePsAccum = 0;
 const AUTO_FREEZE_INTERVAL_PS = 2.0;
 const AUTO_FREEZE_MAX_PER_CALL = 3;
+// Quietness gate: a water must be tumbling slower than this before it
+// gets promoted to frozen. Bulk liquid water at 240 K typically shows
+// mean |ω| around 5–10 rad/ps; this cutoff filters those out and
+// captures only molecules that have genuinely settled into the H-bond
+// network surrounding the crystal.
+const AUTO_FREEZE_OMEGA_MAX_RAD_PS = 3.0;
 let boxGroup: THREE.Group | null = null;
 let boxHelper: THREE.LineSegments | null = null;
 // Box side length (in Angstroms) that the boxHelper geometry was built for;
@@ -1089,25 +1095,47 @@ function updateMode2(_dt: number): void {
     // Local melting: ions approaching the seed unfreeze it locally.
     const thawed = physics.unfreeze_near_ions(4.5);
 
+    // Temperature-driven melting: if the target T has crossed above the
+    // current water model's melting point, release all frozen molecules
+    // back into normal dynamics. Without this escape hatch they stay
+    // rigid at 400 K and the thermostat can't touch them. Runs at most
+    // once per crossing; if T drops back below Tm and you want the
+    // crystal back, re-seed with Add Ice Seed.
+    let meltedAll = 0;
+    const model = WATER_MODELS[currentWaterModelId];
+    const tempSlider = document.getElementById('temp-slider') as HTMLInputElement | null;
+    if (model && tempSlider && seedTinted.size > 0) {
+      const targetT = parseFloat(tempSlider.value);
+      if (targetT > model.meltingPointK) {
+        meltedAll = physics.unfreeze_all_frozen();
+      }
+    }
+
     // Crystal growth: liquid waters H-bonded to the crystal get promoted
     // to frozen on a sim-time schedule. Keeps growth pace consistent
-    // across speed multipliers. The engine caps promotions per call so
-    // we don't flash through waters in a single frame.
+    // across speed multipliers. Skip entirely if we're above Tm — can't
+    // grow ice in a too-warm bath.
     const dtFs = parseFloat(
       (document.getElementById('timestep-slider') as HTMLInputElement).value,
     );
     const elapsedPs = (stepsPerFrame * dtFs) / 1000;
     autoFreezePsAccum += elapsedPs;
     let promoted = 0;
-    if (seedTinted.size > 0 && autoFreezePsAccum >= AUTO_FREEZE_INTERVAL_PS) {
-      promoted = physics.auto_freeze_near_frozen(AUTO_FREEZE_MAX_PER_CALL);
+    const aboveTm = model && tempSlider
+      ? parseFloat(tempSlider.value) > model.meltingPointK
+      : false;
+    if (!aboveTm && seedTinted.size > 0 && autoFreezePsAccum >= AUTO_FREEZE_INTERVAL_PS) {
+      promoted = physics.auto_freeze_near_frozen(
+        AUTO_FREEZE_MAX_PER_CALL,
+        AUTO_FREEZE_OMEGA_MAX_RAD_PS,
+      );
       autoFreezePsAccum = 0;
     }
 
-    // Sync tints for any frozen-state transitions from either direction
-    // (melting or growth). Only touch molecules whose flag disagrees
+    // Sync tints for any frozen-state transitions from melting, ion
+    // contact, or growth. Only touch molecules whose flag disagrees
     // with the cached set.
-    if (thawed > 0 || promoted > 0) {
+    if (thawed > 0 || promoted > 0 || meltedAll > 0) {
       for (let i = 0; i < boxMolecules.length; i++) {
         const nowFrozen = physics.is_molecule_frozen(i);
         const wasTinted = seedTinted.has(i);
