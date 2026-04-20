@@ -473,6 +473,21 @@ function setupUI(): void {
     physics.set_cutoff(v);
     cutoffSlider.value = v.toString();
     cutoffValue.textContent = v.toFixed(1);
+    // Box-size floor depends on cutoff (MI convention needs box > 2·cutoff).
+    // Update the box-size slider's lower bound when the cutoff changes so
+    // the user can't subsequently shrink into an invalid configuration.
+    const n = boxMolecules.length;
+    if (n > 0) {
+      const boxSlider = document.getElementById('box-size-slider') as HTMLInputElement | null;
+      if (boxSlider) {
+        const floor = Math.ceil(Math.max(Math.cbrt(n * 20), v * 2 + 1));
+        boxSlider.min = String(floor);
+        if (parseFloat(boxSlider.value) < floor) {
+          boxSlider.value = String(floor);
+          physics.set_box_size(floor);
+        }
+      }
+    }
   };
   const applyTimestep = (fs: number) => {
     // Slider is in fs for legibility; the physics API takes ps.
@@ -1667,9 +1682,21 @@ async function loadMode2(moleculeName: string, count: number): Promise<void> {
     boxGeo.dispose();
     sceneManager.scene.add(boxHelper);
 
-    // Update box size slider to match
+    // Update box size slider to match, and set a lower bound so the user
+    // can't shrink the box below something physically sensible. Floor is
+    // max of:
+    //   - liquid-density packing limit (~20 Å³/molecule: close-packed
+    //     but not unphysical),
+    //   - 2× the interaction cutoff (minimum-image convention needs
+    //     box > 2·cutoff; otherwise pairs are double-counted across the
+    //     wrap and forces blow up).
     const boxSizeSlider = document.getElementById('box-size-slider') as HTMLInputElement;
     const boxSizeValue = document.getElementById('box-size-value') as HTMLSpanElement;
+    const cutoff = parseFloat(
+      (document.getElementById('cutoff-slider') as HTMLInputElement).value,
+    );
+    const minBox = Math.ceil(Math.max(Math.cbrt(count * 20), cutoff * 2 + 1));
+    boxSizeSlider.min = String(minBox);
     boxSizeSlider.value = boxSize.toString();
     boxSizeValue.textContent = Math.round(boxSize).toString();
 
