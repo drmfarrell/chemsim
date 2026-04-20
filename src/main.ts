@@ -346,11 +346,29 @@ function setupUI(): void {
     switchMode(modeSelector.value as 'mode1' | 'mode2');
   });
 
-  // Molecule selectors
+  // Molecule selectors. In Mode 1 a change on either selector rebuilds
+  // the interacting pair. In Mode 2 only Molecule A matters — the box is
+  // mono-species — so we reload the mode-2 box with the new molecule at
+  // the current count. Previously both selectors unconditionally called
+  // loadMode1Pair, which put a Mode-1 pair into a scene whose
+  // currentMode was still 'mode2', so the pointer handlers refused to
+  // let the user drag the new molecules.
   const selA = document.getElementById('molecule-a-selector') as HTMLSelectElement;
   const selB = document.getElementById('molecule-b-selector') as HTMLSelectElement;
-  selA.addEventListener('change', () => loadMode1Pair(selA.value, selB.value));
-  selB.addEventListener('change', () => loadMode1Pair(selA.value, selB.value));
+  const reloadForSelectorChange = () => {
+    if (currentMode === 'mode2') {
+      // Switching molecule mid-experiment drops us out of any
+      // experiment-specific setup (ice seed, etc.) by design.
+      activeIceSeedExperiment = false;
+      const countSliderEl = document.getElementById('molecule-count-slider') as HTMLInputElement;
+      const idx = parseInt(countSliderEl.value);
+      loadMode2(selA.value, MOLECULE_COUNT_PRESETS[idx]);
+    } else {
+      loadMode1Pair(selA.value, selB.value);
+    }
+  };
+  selA.addEventListener('change', reloadForSelectorChange);
+  selB.addEventListener('change', reloadForSelectorChange);
 
   // Temperature slider
   const tempSlider = document.getElementById('temp-slider') as HTMLInputElement;
