@@ -409,6 +409,15 @@
           <input type="range" id="threads-slider" min="1" max="32" step="1" value="6">
           <div style="font-size:12px; color:#888; margin-top:6px; line-height:1.4;">Water O-H bonds are already constrained by the rigid-body rotation integrator — no SHAKE pass needed. Cutoff is the biggest perf lever; timestep the second; thread count matters at N &gt; 200.</div>
         </div>
+        <div class="control-group" style="margin-top: 12px;">
+          <label title="Classical water force field. Changes charges + LJ on every water molecule; the box rebuilds when switched.">Water model</label>
+          <select id="water-model-selector" style="width:100%;">
+            <option value="tip3p">TIP3P — melts 146K; best for liquid/gas</option>
+            <option value="tip4p-2005" selected>TIP4P/2005 — melts 252K; accurate liquid</option>
+            <option value="tip4p-ice">TIP4P/Ice — melts 270K; best for ice demos</option>
+          </select>
+          <div id="water-model-hint" style="font-size:12px; color:#888; margin-top:6px; line-height:1.4;"></div>
+        </div>
       </div>
 
       <!-- Main panel hide/show toggle: a thin bar on the right edge of the

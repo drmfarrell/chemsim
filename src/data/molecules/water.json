@@ -9,8 +9,8 @@
       "z": 0.1173,
       "charge": 0.0,
       "vdw_radius": 1.52,
-      "epsilon": 0.16275,
-      "sigma": 3.16435
+      "epsilon": 0.7749,
+      "sigma": 3.1589
     },
     {
       "element": "H",

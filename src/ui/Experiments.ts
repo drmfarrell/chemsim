@@ -12,6 +12,10 @@ export interface Experiment {
   temperature?: number;
   moleculeCount?: number;
   barostat?: boolean;  // Whether barostat should be enabled (for freezing/boiling demos)
+  /** Classical water model to use when the experiment involves water.
+   *  Omit to keep whatever the user last selected. One of the keys in
+   *  WATER_MODELS (src/utils/waterModels.ts). */
+  waterModel?: string;
   prompt: string;
 }
 
@@ -83,18 +87,20 @@ export const EXPERIMENTS: Experiment[] = [
     temperature: 300,
     moleculeCount: 64,  // 4³ - good performance with barostat
     barostat: true,  // Barostat enabled to show box expansion during boiling
+    waterModel: 'tip4p-2005',
     prompt: 'Start at 300K and slowly increase the temperature using the slider. Around 373K (100 C), the clusters begin to break apart as molecules gain enough <span class="glossary" title="The energy of motion: faster molecules have more kinetic energy. Temperature is a measure of the average kinetic energy, so heating a substance gives its molecules more speed.">kinetic energy</span> to overcome <span class="glossary" title="A special, directional attraction between a hydrogen attached to an electronegative atom (O, N, or F) and a lone pair on another electronegative atom. Hydrogen bonds are what hold liquid water together.">hydrogen bonding</span>. This is <span class="glossary" title="The temperature at which a liquid turns into a gas. It happens when the average kinetic energy of molecules is high enough to break the attractions holding them together.">boiling</span>. Watch molecules break free from clusters as temperature rises!',
   },
   {
     id: 'water-freezing',
     title: 'Freezing Water',
-    description: 'Watch water molecules slow down and cluster',
+    description: 'Watch water molecules slow down and cluster into an ice lattice',
     mode: 'mode2',
     moleculeA: 'water',
-    temperature: 270,
-    moleculeCount: 64,  // 4³ - good performance with barostat
-    barostat: false,  // Barostat disabled due to runaway expansion issue
-    prompt: 'Start at 270K and lower the temperature further. As the molecules lose <span class="glossary" title="The energy of motion. Cooling a substance takes kinetic energy away from its molecules, slowing them down until attractions dominate over motion.">kinetic energy</span>, they settle into more stable arrangements. Below 273K (0 C), the molecules begin to lock into fixed positions. This is the onset of <span class="glossary" title="The temperature at which a liquid turns into a solid. The molecules no longer have enough kinetic energy to break free of their neighbors, so they lock into a fixed arrangement.">freezing</span>.',
+    temperature: 240,
+    moleculeCount: 216,  // 6³ - enough for a proper Ih lattice to form
+    barostat: false,
+    waterModel: 'tip4p-ice',
+    prompt: 'This demo uses the <b>TIP4P/Ice</b> water model, which melts near 270 K (close to real ice). Start at 240 K and let it run. As molecules lose <span class="glossary" title="The energy of motion. Cooling a substance takes kinetic energy away from its molecules, slowing them down until attractions dominate over motion.">kinetic energy</span>, they lock into the tetrahedral hydrogen-bonded arrangement of <span class="glossary" title="Ordinary ice. Each oxygen is tetrahedrally coordinated by four hydrogen-bonded neighbors.">ice Ih</span>. Nucleation is slow — give it tens of picoseconds, or raise the speed slider. TIP3P would never freeze here; it melts below 150 K.',
   },
 ];
 

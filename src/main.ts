@@ -8,6 +8,11 @@ import { loadMolecule, MoleculeData, MOLECULE_LIST } from './utils/loader';
 import { LJ_PARAMS, ANGSTROM_TO_SCENE, DEFAULT_TEMPERATURE, DEFAULT_MOLECULE_COUNT } from './utils/constants';
 import { Tutorial } from './ui/Tutorial';
 import { EXPERIMENTS, Experiment } from './ui/Experiments';
+import {
+  WATER_MODELS,
+  DEFAULT_WATER_MODEL_ID,
+  suggestModelForTemperature,
+} from './utils/waterModels';
 import init, {
   SimulationSystem,
   initThreadPool,
@@ -46,6 +51,13 @@ let dragOffset = new THREE.Vector3();
 // Mode 2 state
 let boxMolecules: MoleculeRenderer[] = [];
 let boxMoleculeData: MoleculeData | null = null;
+
+// Active water force-field model. Applied to every `water` MoleculeData
+// before it reaches the renderer or the physics engine, so both views agree.
+// Experiments can override this on load (e.g. 'tip4p-ice' for freezing);
+// the Advanced panel dropdown lets the user override further. Switching
+// models rebuilds the mode-2 box rather than hot-swapping mid-run.
+let currentWaterModelId: string = DEFAULT_WATER_MODEL_ID;
 let boxGroup: THREE.Group | null = null;
 let boxHelper: THREE.LineSegments | null = null;
 // Box side length (in Angstroms) that the boxHelper geometry was built for;
@@ -509,6 +521,21 @@ function setupUI(): void {
     });
   }
 
+  // Water-model dropdown: pick the classical force field used for every
+  // water molecule. Change rebuilds mode-2 so the new charges / LJ take
+  // effect cleanly (live-swap would cause a discontinuous energy jump).
+  const waterModelSel = document.getElementById('water-model-selector') as HTMLSelectElement;
+  waterModelSel.value = currentWaterModelId;
+  waterModelSel.addEventListener('change', () => {
+    setWaterModelId(waterModelSel.value, /*rebuild=*/true);
+  });
+  // Temperature-change listener also re-renders the hint so the warning
+  // tracks the slider live.
+  const tempSliderForHint = document.getElementById('temp-slider') as HTMLInputElement;
+  tempSliderForHint.addEventListener('input', updateWaterModelHint);
+  // Initial hint draw.
+  updateWaterModelHint();
+
   // Advanced popup: button toggles visibility.
   const advancedBtn = document.getElementById('advanced-btn') as HTMLButtonElement;
   const advancedPanel = document.getElementById('advanced-panel') as HTMLDivElement;
@@ -769,6 +796,12 @@ function loadExperiment(exp: Experiment): void {
 
   // Set mode
   const modeSelector = document.getElementById('mode-selector') as HTMLSelectElement;
+
+  // Apply the experiment's water-model preference before the mode switch
+  // triggers any loads, so the new molecules come up with the right model.
+  if (exp.waterModel && WATER_MODELS[exp.waterModel]) {
+    setWaterModelId(exp.waterModel, /*rebuild=*/false);
+  }
 
   if (exp.mode === 'mode1') {
     // Set molecule selectors first so switchMode/loadMode1Pair picks up the
@@ -1232,8 +1265,8 @@ async function loadMode1Pair(nameA: string, nameB: string): Promise<void> {
     physics.clear();
     interactionViz.clear();
 
-    moleculeAData = aData;
-    moleculeBData = bData;
+    moleculeAData = applyActiveWaterModel(aData);
+    moleculeBData = applyActiveWaterModel(bData);
 
     // Create renderers
     moleculeA = new MoleculeRenderer(moleculeAData);
@@ -1252,6 +1285,89 @@ async function loadMode1Pair(nameA: string, nameB: string): Promise<void> {
   } catch (e) {
     console.error('Failed to load molecules:', e);
   }
+}
+
+/** Switch the active water model. If `rebuild` is true and we're in mode 2
+ *  with water, reload the box so the new charges / LJ take effect. The
+ *  dropdown is kept in sync, and the temperature hint is refreshed. */
+function setWaterModelId(newId: string, rebuild: boolean): void {
+  if (!WATER_MODELS[newId] || newId === currentWaterModelId) {
+    // Still sync the dropdown in case an experiment picked the current value.
+    const sel = document.getElementById('water-model-selector') as HTMLSelectElement | null;
+    if (sel) sel.value = currentWaterModelId;
+    updateWaterModelHint();
+    return;
+  }
+  currentWaterModelId = newId;
+  const sel = document.getElementById('water-model-selector') as HTMLSelectElement | null;
+  if (sel) sel.value = newId;
+  updateWaterModelHint();
+  if (!rebuild) return;
+  if (currentMode === 'mode2' && boxMoleculeData
+      && boxMoleculeData.name.toLowerCase() === 'water') {
+    const countSlider = document.getElementById('molecule-count-slider') as HTMLInputElement;
+    const selA = document.getElementById('molecule-a-selector') as HTMLSelectElement;
+    const idx = parseInt(countSlider.value);
+    loadMode2(selA.value, MOLECULE_COUNT_PRESETS[idx]);
+  }
+}
+
+/** Refresh the Advanced-panel hint that warns when the current target
+ *  temperature falls outside the selected model's comfort range. */
+function updateWaterModelHint(): void {
+  const hintEl = document.getElementById('water-model-hint');
+  if (!hintEl) return;
+  const model = WATER_MODELS[currentWaterModelId];
+  if (!model) { hintEl.textContent = ''; return; }
+
+  const tempInput = document.getElementById('temp-slider') as HTMLInputElement | null;
+  const t = tempInput ? parseFloat(tempInput.value) : NaN;
+
+  const suggestion = !isNaN(t) ? suggestModelForTemperature(currentWaterModelId, t) : null;
+  if (suggestion) {
+    hintEl.innerHTML =
+      `${model.notes}<br>` +
+      `<b>${Math.round(t)} K is outside ${model.label}'s calibrated range</b> ` +
+      `(${model.usefulRangeK[0]}–${model.usefulRangeK[1]} K). ` +
+      `<a href="#" id="water-model-swap" style="color:#6af;">Switch to ${suggestion.label}</a>.`;
+    const link = document.getElementById('water-model-swap');
+    if (link) {
+      link.addEventListener('click', (e) => {
+        e.preventDefault();
+        setWaterModelId(suggestion.id, true);
+      });
+    }
+  } else {
+    hintEl.textContent = model.notes;
+  }
+}
+
+/** If `data` is water, clone it with atom charges / LJ / virtual sites
+ *  overridden to match the active water model (see waterModels.ts). Any
+ *  other molecule is returned unchanged. Caller uses the returned
+ *  MoleculeData for both rendering and physics so the two stay in sync. */
+function applyActiveWaterModel(data: MoleculeData): MoleculeData {
+  if (data.name.toLowerCase() !== 'water') return data;
+  const model = WATER_MODELS[currentWaterModelId];
+  if (!model) return data;
+
+  const atoms = data.atoms.map(a => {
+    const copy = { ...a };
+    if (a.element === 'O') {
+      copy.charge = model.oCharge;
+      copy.epsilon = model.oEpsilon;
+      copy.sigma = model.oSigma;
+    } else if (a.element === 'H') {
+      copy.charge = model.hCharge;
+    }
+    return copy;
+  });
+
+  const virtual_sites = model.mCharge !== null
+    ? [{ charge: model.mCharge, ref_atoms: [0, 1, 2], site_type: 'tip4p' }]
+    : [];
+
+  return { ...data, atoms, virtual_sites };
 }
 
 function addMoleculeToPhysics(data: MoleculeData, cx: number, cy: number, cz: number): void {
@@ -1298,7 +1414,7 @@ async function loadMode2(moleculeName: string, count: number): Promise<void> {
     physics.clear();
     interactionViz.clear();
 
-    boxMoleculeData = data;
+    boxMoleculeData = applyActiveWaterModel(data);
 
     // Get target temperature BEFORE calculating box size, since water density
     // depends strongly on temperature (liquid vs ice).
