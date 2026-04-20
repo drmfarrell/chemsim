@@ -1677,9 +1677,28 @@ async function addBunchOfMolecules(species: string, count: number): Promise<numb
     return best;
   };
 
-  // Grid placement at dropCenter, jittered.
+  // Grid placement at dropCenter, jittered. Spacing is species-specific
+  // because a 4 Å grid (the old default) cramming CCl4's ~7 Å-wide
+  // molecules into themselves produces explosive LJ repulsion, which
+  // then scatters them into gas-like clumps. Values below target each
+  // species' liquid density (cbrt of experimental molar volume).
+  const spacingTable: Record<string, number> = {
+    water: 3.1,
+    ammonia: 3.5,
+    hydrogen_sulfide: 3.7,
+    methane: 3.9,
+    carbon_dioxide: 4.0,
+    methanol: 4.1,
+    urea: 4.2,
+    tetrafluoromethane: 4.5,
+    ethanol: 4.6,
+    chloroform: 5.1,
+    carbon_tetrachloride: 5.5,
+    sodium_ion: 3.0,
+    chloride_ion: 3.3,
+  };
+  const spacing = spacingTable[species] ?? 4.2;
   const perSide = Math.ceil(Math.cbrt(count));
-  const spacing = 4.0;  // Å — close to liquid packing for mid-sized molecules
   const half_span = spacing * perSide / 2;
   const jitter = spacing * 0.1;
   let placed = 0;
