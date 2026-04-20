@@ -23,7 +23,7 @@ pub fn verlet_position_step(
 
     for (i, mol) in molecules.iter_mut().enumerate() {
         let mass = mol.total_mass();
-        if mass < 0.01 {
+        if mass < 0.01 || mol.is_frozen {
             old_accel.push((0.0, 0.0, 0.0));
             continue;
         }
@@ -74,7 +74,7 @@ pub fn verlet_velocity_step(
 ) {
     for (i, mol) in molecules.iter_mut().enumerate() {
         let mass = mol.total_mass();
-        if mass < 0.01 { continue; }
+        if mass < 0.01 || mol.is_frozen { continue; }
 
         let conv = 0.01 / mass;
         let (nfx, nfy, nfz) = new_forces[i];

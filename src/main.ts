@@ -1463,6 +1463,11 @@ function addIceSeed(cx: number, cy: number, cz: number): number {
 
     // Physics: atoms end up at world positions (cx_in_call + body_atoms).
     addMoleculeToPhysics(seedData, comX, comY, comZ);
+    // Freeze this water so it acts as a stable substrate. The Verlet /
+    // rotation integrators and thermostat skip frozen molecules; pair
+    // forces still flow normally so liquid neighbors feel the seed.
+    const molIdx = physics.get_molecule_count() - 1;
+    physics.set_molecule_frozen(molIdx, true);
 
     // Renderer: body-frame atoms live in the group's local frame; group is
     // positioned at the COM. Physics will update the quaternion each

@@ -82,7 +82,7 @@ pub fn integrate_rotation(
     const CONV: f64 = 0.01; // kJ/(mol*amu*Å^2) -> rad/ps^2
 
     for (i, mol) in molecules.iter_mut().enumerate() {
-        if mol.body_coords.is_empty() { continue; }
+        if mol.body_coords.is_empty() || mol.is_frozen { continue; }
 
         // Transform torque from world frame into body frame.
         let tau_body = rotate_by_quat_inv(mol.q, torques_world[i]);

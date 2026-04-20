@@ -111,6 +111,13 @@ pub struct Molecule {
     pub atom_epsilons: Vec<f64>,
     #[serde(default, skip)]
     pub atom_sigmas: Vec<f64>,
+
+    /// When true, integrators leave this molecule's position, orientation,
+    /// and velocities alone. Pair forces are still computed so liquid
+    /// neighbors feel the frozen molecule — used for pre-placed ice seeds
+    /// that act as a stable substrate for heterogeneous nucleation.
+    #[serde(default)]
+    pub is_frozen: bool,
 }
 
 fn identity_quat() -> (f64, f64, f64, f64) { (1.0, 0.0, 0.0, 0.0) }
@@ -133,6 +140,7 @@ impl Default for Molecule {
             atom_charges: Vec::new(),
             atom_epsilons: Vec::new(),
             atom_sigmas: Vec::new(),
+            is_frozen: false,
         }
     }
 }

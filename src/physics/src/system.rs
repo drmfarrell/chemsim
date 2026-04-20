@@ -175,6 +175,7 @@ impl SimulationSystem {
             atom_charges: Vec::new(),
             atom_epsilons: Vec::new(),
             atom_sigmas: Vec::new(),
+            is_frozen: false,
         };
         mol.compute_center();
         mol.init_rigid_body();
@@ -214,6 +215,22 @@ impl SimulationSystem {
         let dz = z - mol.center_z;
         mol.translate(dx, dy, dz);
         self.forces_valid = false;
+    }
+
+    /// Freeze or unfreeze a single molecule. Frozen molecules keep their
+    /// velocities at zero and are skipped by the position, velocity, and
+    /// rotation integrators plus the thermostat. Pair forces are still
+    /// computed, so liquid neighbors interact with the frozen molecule
+    /// normally — this is how a pre-built ice seed acts as a stable
+    /// substrate for the surrounding supercooled water to nucleate onto.
+    pub fn set_molecule_frozen(&mut self, idx: usize, frozen: bool) {
+        if idx >= self.molecules.len() { return; }
+        let mol = &mut self.molecules[idx];
+        mol.is_frozen = frozen;
+        if frozen {
+            mol.vx = 0.0; mol.vy = 0.0; mol.vz = 0.0;
+            mol.omega_body = (0.0, 0.0, 0.0);
+        }
     }
 
     /// Set the orientation of a specific molecule (for the Mode 1 rotation

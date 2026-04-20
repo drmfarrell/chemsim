@@ -29,6 +29,7 @@ pub fn berendsen_thermostat(
     let lambda = lambda_sq.sqrt();
 
     for mol in molecules.iter_mut() {
+        if mol.is_frozen { continue; }
         mol.vx *= lambda;
         mol.vy *= lambda;
         mol.vz *= lambda;
@@ -50,7 +51,13 @@ pub fn initialize_velocities(molecules: &mut [Molecule], target_temp: f64) {
 
     for mol in molecules.iter_mut() {
         let mass = mol.total_mass();
-        if mass < 0.01 { continue; }
+        if mass < 0.01 || mol.is_frozen {
+            // Frozen seed waters keep zero velocity — they're held as a
+            // fixed substrate for heterogeneous nucleation.
+            mol.vx = 0.0; mol.vy = 0.0; mol.vz = 0.0;
+            mol.omega_body = (0.0, 0.0, 0.0);
+            continue;
+        }
 
         // sigma_v = sqrt(k_B * T / (m * 100))
         // The 100 factor: v is in Angstrom/ps, and 1 amu*(Angstrom/ps)^2 = 0.01 kJ/mol
