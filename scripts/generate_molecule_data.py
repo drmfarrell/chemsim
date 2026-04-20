@@ -168,6 +168,40 @@ MOLECULES = [
         "molecular_weight": 32.042,
     },
     {
+        # Ethanol CH3-CH2-OH. OPLS-AA partial charges; approximate
+        # gas-phase trans geometry (C-C 1.53, C-O 1.42, O-H 0.96, tetra
+        # H-C-H angles). Dipole + polarizability from CRC. Miscible
+        # with water via the hydroxyl; paired with CCl4 (immiscible)
+        # it demonstrates the "like dissolves like" rule for students.
+        "filename": "ethanol.json",
+        "name": "Ethanol",
+        "formula": "C2H5OH",
+        "atoms": [
+            {"element": "C", "x":  1.2650, "y":  0.2550, "z":  0.0000, "charge": -0.180, "vdw_radius": VDW["C"]},  # 0: CH3 carbon
+            {"element": "C", "x":  0.0000, "y": -0.4900, "z":  0.0000, "charge":  0.145, "vdw_radius": VDW["C"]},  # 1: CH2 carbon (bonded to O)
+            {"element": "O", "x": -1.1650, "y":  0.3100, "z":  0.0000, "charge": -0.683, "vdw_radius": VDW["O"]},  # 2: hydroxyl O
+            {"element": "H", "x": -1.9350, "y": -0.2450, "z":  0.0000, "charge":  0.418, "vdw_radius": VDW["H"]},  # 3: hydroxyl H
+            {"element": "H", "x":  0.0000, "y": -1.1350, "z":  0.8900, "charge":  0.060, "vdw_radius": VDW["H"]},  # 4: methylene H
+            {"element": "H", "x":  0.0000, "y": -1.1350, "z": -0.8900, "charge":  0.060, "vdw_radius": VDW["H"]},  # 5: methylene H
+            {"element": "H", "x":  1.3100, "y":  0.8950, "z":  0.8900, "charge":  0.060, "vdw_radius": VDW["H"]},  # 6: methyl H
+            {"element": "H", "x":  1.3100, "y":  0.8950, "z": -0.8900, "charge":  0.060, "vdw_radius": VDW["H"]},  # 7: methyl H
+            {"element": "H", "x":  2.1260, "y": -0.4250, "z":  0.0000, "charge":  0.060, "vdw_radius": VDW["H"]},  # 8: methyl H
+        ],
+        "bonds": [
+            {"from": 0, "to": 1, "order": 1},
+            {"from": 1, "to": 2, "order": 1},
+            {"from": 2, "to": 3, "order": 1},
+            {"from": 1, "to": 4, "order": 1},
+            {"from": 1, "to": 5, "order": 1},
+            {"from": 0, "to": 6, "order": 1},
+            {"from": 0, "to": 7, "order": 1},
+            {"from": 0, "to": 8, "order": 1},
+        ],
+        "polarizability": 5.41,
+        "dipole_moment": 1.69,
+        "molecular_weight": 46.069,
+    },
+    {
         "filename": "tetrafluoromethane.json",
         "name": "Tetrafluoromethane",
         "formula": "CF4",

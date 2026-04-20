@@ -20,6 +20,13 @@ export interface Experiment {
    *  seed crystal at the center of the water drop. The liquid grid carves
    *  out a sphere around the seed to avoid overlaps. */
   iceSeed?: boolean;
+  /** For binary-mixture demos: after the mode-2 box loads with Molecule A,
+   *  drop `secondCount` molecules of `secondSpecies` into the box on the
+   *  opposite side. The two populations start phase-separated, then the
+   *  sim evolves them — miscibility is whatever their pair energetics
+   *  prefers. */
+  secondSpecies?: string;
+  secondCount?: number;
   prompt: string;
 }
 
@@ -106,6 +113,34 @@ export const EXPERIMENTS: Experiment[] = [
     waterModel: 'tip4p-ice',
     iceSeed: true,
     prompt: 'This demo uses the <b>TIP4P/Ice</b> water model (melting point ~270 K) and starts with a small pre-built <span class="glossary" title="Ordinary ice. Each oxygen is tetrahedrally coordinated by four hydrogen-bonded neighbors.">ice Ih</span> seed crystal at the center, surrounded by supercooled liquid at 240 K. Homogeneous nucleation from scratch would take nanoseconds; with the seed in place, surrounding liquid locks onto the lattice within tens of picoseconds. Watch the crystal grow outward as neighboring waters stop wiggling and settle into tetrahedral coordination.',
+  },
+  {
+    id: 'water-ccl4-immiscible',
+    title: 'Water vs CCl\u2084 (Doesn\'t Mix)',
+    description: 'Polar water and nonpolar CCl\u2084 refuse to dissolve each other',
+    mode: 'mode2',
+    moleculeA: 'water',
+    temperature: 300,
+    moleculeCount: 125,
+    barostat: false,
+    waterModel: 'tip4p-2005',
+    secondSpecies: 'carbon_tetrachloride',
+    secondCount: 64,
+    prompt: 'The box starts with <span class="glossary" title="Polar molecule: water has a strongly charged region (oxygen, negative) and a complementary positive region (hydrogens). Polar molecules stick to each other via electrostatic interactions.">polar water</span> on one side and <span class="glossary" title="Nonpolar molecule: the four C-Cl dipoles in CCl4 cancel out by symmetry, so the molecule has no net charge separation. Nonpolar molecules don\'t form hydrogen bonds with water.">nonpolar CCl\u2084</span> on the other. Press Play. Watch how the two populations stay separate — water-water hydrogen bonds are strong, CCl\u2084-CCl\u2084 London forces are weak, and water-CCl\u2084 interactions are weaker than either self-interaction. This is the molecular reason for "like dissolves like."',
+  },
+  {
+    id: 'water-ethanol-miscible',
+    title: 'Water + Ethanol (Mixes Freely)',
+    description: 'Ethanol\'s hydroxyl group lets it hydrogen-bond with water',
+    mode: 'mode2',
+    moleculeA: 'water',
+    temperature: 300,
+    moleculeCount: 125,
+    barostat: false,
+    waterModel: 'tip4p-2005',
+    secondSpecies: 'ethanol',
+    secondCount: 64,
+    prompt: 'Same setup as the CCl\u2084 experiment, but now the second species is <span class="glossary" title="Ethanol (CH3CH2OH): a small alcohol with a polar hydroxyl group (-OH) that can both donate and accept hydrogen bonds, plus a nonpolar ethyl tail.">ethanol</span>. The -OH group can <span class="glossary" title="A hydrogen bond: an H attached to an electronegative atom (like O here) weakly attaches to a lone pair on another electronegative atom on a neighbor molecule.">hydrogen-bond</span> with water just like water hydrogen-bonds with itself — so water-ethanol contacts are nearly as favorable as water-water contacts, and the two liquids mix freely. Watch them interpenetrate over tens of picoseconds.',
   },
 ];
 

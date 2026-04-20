@@ -71,6 +71,14 @@ let currentWaterModelId: string = DEFAULT_WATER_MODEL_ID;
 // or model so subsequent Mode-2 loads don't unexpectedly seed.
 let activeIceSeedExperiment: boolean = false;
 
+// Set by loadExperiment for binary-mixture demos. After loadMode2 finishes
+// populating the primary species it drops this many `pendingSecondSpecies`
+// molecules into the opposite side of the box — gives miscibility
+// experiments a phase-separated initial state. Consumed once (cleared
+// after use) so a later count/model change doesn't accidentally re-add.
+let pendingSecondSpecies: string | null = null;
+let pendingSecondCount: number = 0;
+
 // Molecule indices of frozen waters (seed + auto-promoted) currently
 // carrying the ice-blue tint. Transitions in is_frozen are synced to
 // setFrozenTint each animation frame. Reset on every new Mode-2 load.
@@ -666,6 +674,29 @@ function setupUI(): void {
     }
   });
 
+  // Populate the generic "add species" dropdown with the same molecule
+  // list as the main selector. Used for miscibility demos (dropping CCl4
+  // into a water box, adding ethanol to water, etc).
+  const addSpeciesSel = document.getElementById('add-species-selector') as HTMLSelectElement;
+  for (const mol of MOLECULE_LIST) {
+    const opt = document.createElement('option');
+    opt.value = mol.id;
+    opt.textContent = `${mol.formula} (${mol.name})`;
+    addSpeciesSel.appendChild(opt);
+  }
+  addSpeciesSel.value = 'carbon_tetrachloride';  // sensible default: the classic "doesn't dissolve" demo
+
+  document.getElementById('add-species-btn')!.addEventListener('click', async () => {
+    if (currentMode !== 'mode2' || !boxMoleculeData) {
+      alert('Please switch to Mode 2 and load a simulation first.');
+      return;
+    }
+    const countInput = document.getElementById('add-species-count') as HTMLInputElement;
+    const n = Math.max(1, Math.min(500, parseInt(countInput.value) || 0));
+    const added = await addBunchOfMolecules(addSpeciesSel.value, n);
+    console.log(`Added ${added} ${addSpeciesSel.value} molecules.`);
+  });
+
   // Mode 2: Add Salt Crystal button - creates a NaCl crystal that water can dissolve
   document.getElementById('add-ice-seed-btn')!.addEventListener('click', () => {
     if (currentMode !== 'mode2' || !boxMoleculeData || boxMoleculeData.name.toLowerCase() !== 'water') {
@@ -889,6 +920,14 @@ function loadExperiment(exp: Experiment): void {
   // load; cleared afterwards so a later count/model change doesn't
   // accidentally re-seed.
   activeIceSeedExperiment = !!exp.iceSeed;
+  // Same pattern for the second species in mixing demos.
+  if (exp.secondSpecies && exp.secondCount && exp.secondCount > 0) {
+    pendingSecondSpecies = exp.secondSpecies;
+    pendingSecondCount = exp.secondCount;
+  } else {
+    pendingSecondSpecies = null;
+    pendingSecondCount = 0;
+  }
 
   if (exp.mode === 'mode1') {
     // Set molecule selectors first so switchMode/loadMode1Pair picks up the
@@ -1583,6 +1622,97 @@ function addIceSeed(
   return { placed, oxygens };
 }
 
+/** Drop `count` molecules of the named species into the current Mode-2
+ *  box, placed on the opposite side of the existing population so the
+ *  two phases start separated (miscibility demos need a clear starting
+ *  state for "does it mix or not"). Returns the number actually added
+ *  — capped by whatever fits in the unused box volume without
+ *  overlapping existing molecules. */
+async function addBunchOfMolecules(species: string, count: number): Promise<number> {
+  const data = await loadMolecule(species);
+  const applied = applyActiveWaterModel(data);
+  const cloudOn = document.getElementById('toggle-cloud')?.classList.contains('active') ?? true;
+
+  // Centroid of existing molecules — "opposite side" of this is where
+  // the new bunch should go. If the existing drop happens to be centered
+  // at origin, default to +x.
+  const boxSize = physics.get_box_size();
+  const half = boxSize / 2;
+  let cx = 0, cy = 0, cz = 0;
+  if (boxMolecules.length > 0) {
+    const positions = physics.get_all_positions();
+    for (let i = 0; i < boxMolecules.length; i++) {
+      cx += positions[i * 3]; cy += positions[i * 3 + 1]; cz += positions[i * 3 + 2];
+    }
+    cx /= boxMolecules.length; cy /= boxMolecules.length; cz /= boxMolecules.length;
+  }
+  const existingOffset = Math.sqrt(cx * cx + cy * cy + cz * cz);
+  let dropCx: number, dropCy: number, dropCz: number;
+  if (existingOffset > 1.0) {
+    // Opposite of existing centroid.
+    const scale = -0.8 * Math.min(half * 0.5, existingOffset * 2) / existingOffset;
+    dropCx = cx * scale; dropCy = cy * scale; dropCz = cz * scale;
+  } else {
+    // Existing is centered; place new bunch +x quarter.
+    dropCx = half * 0.45; dropCy = 0; dropCz = 0;
+  }
+
+  // Minimum-distance check so new molecules don't stick into existing
+  // ones. Conservative: 3.5 Å between any pair of molecule centers.
+  const existingCenters: [number, number, number][] = [];
+  if (boxMolecules.length > 0) {
+    const positions = physics.get_all_positions();
+    for (let i = 0; i < boxMolecules.length; i++) {
+      existingCenters.push([positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2]]);
+    }
+  }
+  const MIN_SEP2 = 3.5 * 3.5;
+  const minDistToExisting = (x: number, y: number, z: number): number => {
+    let best = Infinity;
+    for (const c of existingCenters) {
+      const dx = x - c[0], dy = y - c[1], dz = z - c[2];
+      const d2 = dx * dx + dy * dy + dz * dz;
+      if (d2 < best) best = d2;
+    }
+    return best;
+  };
+
+  // Grid placement at dropCenter, jittered.
+  const perSide = Math.ceil(Math.cbrt(count));
+  const spacing = 4.0;  // Å — close to liquid packing for mid-sized molecules
+  const half_span = spacing * perSide / 2;
+  const jitter = spacing * 0.1;
+  let placed = 0;
+
+  outer:
+  for (let ix = 0; ix < perSide; ix++) {
+    for (let iy = 0; iy < perSide; iy++) {
+      for (let iz = 0; iz < perSide; iz++) {
+        if (placed >= count) break outer;
+        const x = dropCx + (ix + 0.5) * spacing - half_span + (Math.random() - 0.5) * jitter;
+        const y = dropCy + (iy + 0.5) * spacing - half_span + (Math.random() - 0.5) * jitter;
+        const z = dropCz + (iz + 0.5) * spacing - half_span + (Math.random() - 0.5) * jitter;
+
+        // Keep inside the box with a small wall buffer.
+        if (Math.abs(x) > half - 2 || Math.abs(y) > half - 2 || Math.abs(z) > half - 2) continue;
+        // Don't overlap any existing molecule.
+        if (minDistToExisting(x, y, z) < MIN_SEP2) continue;
+
+        addMoleculeToPhysics(applied, x, y, z);
+        const renderer = new MoleculeRenderer(applied);
+        renderer.getGroup().position.set(
+          x * ANGSTROM_TO_SCENE, y * ANGSTROM_TO_SCENE, z * ANGSTROM_TO_SCENE,
+        );
+        renderer.setCloudVisible(cloudOn);
+        sceneManager.scene.add(renderer.getGroup());
+        boxMolecules.push(renderer);
+        placed++;
+      }
+    }
+  }
+  return placed;
+}
+
 function addMoleculeToPhysics(data: MoleculeData, cx: number, cy: number, cz: number): void {
   const atoms = data.atoms.map(a => {
     // Use molecule-specific LJ params if provided, otherwise fall back to element defaults
@@ -1811,6 +1941,19 @@ async function loadMode2(moleculeName: string, count: number): Promise<void> {
 
     if (wantSeed) {
       console.log(`Liquid: ${placed} waters around ${seedOxygens.length}-oxygen seed`);
+    }
+
+    // Binary-mixture demos: the experiment set pendingSecondSpecies.
+    // Drop that population into the other half of the box now, BEFORE
+    // velocity initialization, so every molecule gets a thermal kick
+    // and the two populations start phase-separated.
+    if (pendingSecondSpecies && pendingSecondCount > 0) {
+      const sp = pendingSecondSpecies;
+      const sc = pendingSecondCount;
+      pendingSecondSpecies = null;
+      pendingSecondCount = 0;
+      const added = await addBunchOfMolecules(sp, sc);
+      console.log(`Binary mixture: added ${added} ${sp} on opposite side.`);
     }
 
     // Initialize velocities and start simulation
