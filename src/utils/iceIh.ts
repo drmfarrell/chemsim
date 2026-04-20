@@ -187,43 +187,95 @@ export function generateIceIhSeed(
     neighbors.push(cand.slice(0, 4).map(c => c.j));
   }
 
-  // 4. Ice-rule proton assignment by directing each undirected edge once,
-  //    respecting a 2-out cap per oxygen. This guarantees no two waters
-  //    donate H toward each other across the same edge — the bug we fixed
-  //    from the previous "per-oxygen lowest-acceptance" heuristic.
+  // 4. Ice-rule proton assignment. We want every interior oxygen to have
+  //    out-degree = 2 (donates 2 H) and in-degree = 2 (accepts 2 H-bonds).
+  //    Pure greedy with a 2-out cap prevents mutual donation but doesn't
+  //    balance in-degree — over-accepting oxygens end up with 3 H atoms
+  //    stacked near them, which gives visible H-H clashes.
+  //
+  //    Approach: try many random edge orderings with the greedy cap
+  //    (balance-aware tiebreak when both ends have slots), score each
+  //    by "imbalance cost" = Σ(in_deg - target)² + Σ(out_deg - target)²
+  //    where target = min(deg, 2), then keep the best assignment. For
+  //    the ~50-edge seed this converges to the global minimum quickly
+  //    and is deterministic across runs thanks to the seeded RNG.
   const edges: [number, number][] = [];
   for (let i = 0; i < oxygens.length; i++) {
     for (const j of neighbors[i]) {
       if (j > i) edges.push([i, j]);
     }
   }
-  // Shuffle edges deterministically so the assignment isn't
-  // order-dependent but is reproducible run-to-run.
-  edges.sort((a, b) => {
-    const ka = a[0] * 1000 + a[1], kb = b[0] * 1000 + b[1];
-    // Pseudo-random spread using a cheap mixer.
-    const ha = ((ka * 2654435761) >>> 0) ^ 0x9e3779b9;
-    const hb = ((kb * 2654435761) >>> 0) ^ 0x9e3779b9;
-    return ha - hb;
-  });
 
-  const outDeg = new Array<number>(oxygens.length).fill(0);
-  const donorsFor: number[][] = Array.from({ length: oxygens.length }, () => []);
-  for (const [a, b] of edges) {
-    if (outDeg[a] < 2 && outDeg[b] < 2) {
-      // Tiebreak by z + x of the two oxygens for determinism.
-      const pa = oxygens[a][2] + oxygens[a][0];
-      const pb = oxygens[b][2] + oxygens[b][0];
-      if (pa < pb) { donorsFor[a].push(b); outDeg[a]++; }
-      else        { donorsFor[b].push(a); outDeg[b]++; }
-    } else if (outDeg[a] < 2) {
-      donorsFor[a].push(b); outDeg[a]++;
-    } else if (outDeg[b] < 2) {
-      donorsFor[b].push(a); outDeg[b]++;
-    }
-    // If both are already at 2, skip — the edge is accepted-only from
-    // both sides' perspectives (ok, but hints at surface under-coord).
+  // Mulberry32 — tiny deterministic PRNG for the shuffles.
+  function rng(seed: number): () => number {
+    let s = seed >>> 0;
+    return () => {
+      s = (s + 0x6D2B79F5) >>> 0;
+      let t = s;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
   }
+
+  function attemptAssignment(seed: number): {
+    donors: number[][]; inDeg: number[]; outDeg: number[]; cost: number;
+  } {
+    const r = rng(seed);
+    const shuffled = edges.slice();
+    for (let i = shuffled.length - 1; i > 0; i--) {
+      const j = Math.floor(r() * (i + 1));
+      [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+    }
+    const outDeg = new Array<number>(oxygens.length).fill(0);
+    const inDeg  = new Array<number>(oxygens.length).fill(0);
+    const donors: number[][] = Array.from({ length: oxygens.length }, () => []);
+    for (const [a, b] of shuffled) {
+      // Hard caps: no water donates more than 2 H, and no water accepts
+      // more than 2 H-bonds (the second cap was the missing piece —
+      // without it, over-accepting oxygens force H atoms into the same
+      // region and we see 1-Å H-H clashes). If neither direction fits,
+      // leave the edge undirected.
+      const canAToB = outDeg[a] < 2 && inDeg[b] < 2;
+      const canBToA = outDeg[b] < 2 && inDeg[a] < 2;
+      if (canAToB && canBToA) {
+        // Break the tie by pointing toward the endpoint with fewer
+        // current acceptances — this biases toward balanced in-degrees.
+        if (inDeg[b] <= inDeg[a]) {
+          donors[a].push(b); outDeg[a]++; inDeg[b]++;
+        } else {
+          donors[b].push(a); outDeg[b]++; inDeg[a]++;
+        }
+      } else if (canAToB) {
+        donors[a].push(b); outDeg[a]++; inDeg[b]++;
+      } else if (canBToA) {
+        donors[b].push(a); outDeg[b]++; inDeg[a]++;
+      }
+      // else: neither cap allows this edge to be directed; skip.
+    }
+    // Cost: penalize deviation from ideal 2-in/2-out for interior
+    // vertices (degree 4). Boundary vertices (deg < 4) can't hit the
+    // target and we forgive them.
+    let cost = 0;
+    for (let i = 0; i < oxygens.length; i++) {
+      const deg = neighbors[i].length;
+      const ideal = Math.min(2, Math.floor(deg / 2) + ((deg % 2) & 1));
+      cost += (inDeg[i]  - ideal) * (inDeg[i]  - ideal);
+      cost += (outDeg[i] - ideal) * (outDeg[i] - ideal);
+      // Heavy penalty for an acceptor exceeding 2: that's the specific
+      // failure mode that stacks H atoms on top of each other.
+      if (inDeg[i] > 2) cost += 100 * (inDeg[i] - 2) * (inDeg[i] - 2);
+    }
+    return { donors, inDeg, outDeg, cost };
+  }
+
+  let best = attemptAssignment(0);
+  for (let seed = 1; seed < 4096; seed++) {
+    const trial = attemptAssignment(seed);
+    if (trial.cost < best.cost) best = trial;
+    if (best.cost === 0) break;
+  }
+  const donorsFor = best.donors;
 
   // 5. For each water, compute the orientation quaternion that rotates the
   //    canonical water body frame into the world orientation where its two

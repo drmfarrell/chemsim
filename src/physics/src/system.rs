@@ -217,6 +217,12 @@ impl SimulationSystem {
         self.forces_valid = false;
     }
 
+    /// Whether the molecule at `idx` is currently frozen (skipped by
+    /// integrators). See `set_molecule_frozen`.
+    pub fn is_molecule_frozen(&self, idx: usize) -> bool {
+        self.molecules.get(idx).map(|m| m.is_frozen).unwrap_or(false)
+    }
+
     /// Freeze or unfreeze a single molecule. Frozen molecules keep their
     /// velocities at zero and are skipped by the position, velocity, and
     /// rotation integrators plus the thermostat. Pair forces are still
