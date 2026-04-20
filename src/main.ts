@@ -1619,16 +1619,23 @@ async function loadMode2(moleculeName: string, count: number): Promise<void> {
       moleculeVolume = Math.pow(targetSpacing * Math.cbrt(count), 3);
     }
 
-    // Size the box with enough headroom around the initial "drop" that a
-    // salt crystal (2x2x2 NaCl unit cells, ~11 A wide, placed ~15% from
-    // center) and its ions have somewhere to dissolve into. 3.2x puts the
-    // box at ~49 A for 125 waters, which keeps the crystal and its dissolved
-    // ions clear of the walls.
+    // Size the box. Default: 3.2x drop size with solid walls — leaves
+    // room for salt crystals and dissolved ions, and walls contain the
+    // liquid even though it's not at a true equilibrium density.
+    //
+    // For the freezing demo we do the opposite: tighten the box around
+    // the drop (1.3x) and use periodic boundaries. Without that, surface
+    // waters with high thermal kinetic energy escape the drop and drift
+    // through the empty vacuum region — physically real (zero-g
+    // microscopic droplet) but visually a mess. Periodic BCs let
+    // escapees wrap back around to the other side; no net drift.
+    const wantIceSeed = activeIceSeedExperiment && isWater
+      && WATER_MODELS[currentWaterModelId]?.id === 'tip4p-ice';
     const dropSize = Math.cbrt(moleculeVolume);
-    const boxSize = dropSize * 3.2;
+    const boxSize = wantIceSeed ? dropSize * 1.3 : dropSize * 3.2;
 
     physics.set_box_size(boxSize);
-    physics.set_periodic(false);  // Default to walls (not periodic) - easier to understand
+    physics.set_periodic(wantIceSeed);
     physics.set_thermostat(true);
     physics.set_temperature(targetTemp);
 
@@ -1666,19 +1673,25 @@ async function loadMode2(moleculeName: string, count: number): Promise<void> {
     boxSizeSlider.value = boxSize.toString();
     boxSizeValue.textContent = Math.round(boxSize).toString();
 
-    // Update periodic button state (default = Solid Walls, not periodic)
+    // Update periodic button + box appearance to match the actual mode.
     const periodicBtn = document.getElementById('toggle-periodic') as HTMLButtonElement;
-    periodicBtn.classList.add('active');
-    periodicBtn.textContent = 'Solid Walls';
-    updateBoxAppearance(true);  // Solid walls appearance
+    if (wantIceSeed) {
+      periodicBtn.classList.remove('active');
+      periodicBtn.textContent = 'Periodic';
+      updateBoxAppearance(false);
+    } else {
+      periodicBtn.classList.add('active');
+      periodicBtn.textContent = 'Solid Walls';
+      updateBoxAppearance(true);
+    }
 
     // If the active experiment wants an ice seed at the center (freezing
     // demo), add it BEFORE the liquid so we know where its oxygens sit;
     // the liquid loop then skips any grid site that would overlap the
     // seed. Seed waters count against `count`, so the total molecule
-    // budget stays what the slider says.
-    const wantSeed = activeIceSeedExperiment && isWater
-      && WATER_MODELS[currentWaterModelId]?.id === 'tip4p-ice';
+    // budget stays what the slider says. (wantIceSeed is already
+    // computed above for box-size selection.)
+    const wantSeed = wantIceSeed;
     let seedOxygens: [number, number, number][] = [];
     if (wantSeed) {
       const dims = seedDimsForCount(count);
