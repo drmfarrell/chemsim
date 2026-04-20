@@ -461,16 +461,17 @@
           <span class="energy-label">Step: </span>
           <span id="sim-step">0</span>
         </div>
-        <!-- Graph toggle -->
+        <!-- Real-time graph (default visible). Ordering front (mean |ω| of
+             liquid molecules) drops as the H-bond network locks in; NN
+             distance settles toward 2.76 Å in the ordered regions. -->
         <div style="margin-top: 8px;">
-          <button id="toggle-graph" class="control-btn" style="font-size: 11px; padding: 4px 8px;">Show Graph</button>
+          <button id="toggle-graph" class="control-btn active" style="font-size: 11px; padding: 4px 8px;">Hide Graph</button>
         </div>
-        <!-- Real-time graph (hidden by default) -->
-        <div id="graph-container" style="margin-top: 8px; display: none;">
+        <div id="graph-container" style="margin-top: 8px; display: block;">
           <canvas id="stats-graph" width="280" height="120"></canvas>
           <div style="font-size: 11px; color: #aaa;">
-            <span style="color: #4f8;">■</span> Box Size (Å) |
-            <span style="color: #f84;">■</span> NN Dist (Å)
+            <span style="color: #f84;">■</span> NN Dist (Å) |
+            <span style="color: #6af;">■</span> Liquid |ω| (rad/ps)
           </div>
         </div>
       </div>

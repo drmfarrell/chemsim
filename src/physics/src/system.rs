@@ -461,6 +461,23 @@ impl SimulationSystem {
 
     pub fn get_temperature(&self) -> f64 { compute_temperature(&self.molecules) }
     pub fn get_kinetic_energy(&self) -> f64 { kinetic_energy(&self.molecules) }
+
+    /// Mean body-frame angular speed |ω| (rad/ps) over non-frozen molecules.
+    /// Useful as a freezing order parameter: liquid waters tumble fast
+    /// (~5–15 rad/ps at 300 K); rotationally ordered waters locked into
+    /// an ice H-bond network settle to much lower values as the crystal
+    /// front advances into them.
+    pub fn get_mean_angular_speed_liquid(&self) -> f64 {
+        let mut total = 0.0;
+        let mut n = 0;
+        for mol in &self.molecules {
+            if mol.is_frozen { continue; }
+            let (wx, wy, wz) = mol.omega_body;
+            total += (wx * wx + wy * wy + wz * wz).sqrt();
+            n += 1;
+        }
+        if n == 0 { 0.0 } else { total / n as f64 }
+    }
     pub fn get_molecule_count(&self) -> usize { self.molecules.len() }
     pub fn get_step_count(&self) -> u64 { self.step_count }
 

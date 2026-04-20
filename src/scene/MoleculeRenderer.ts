@@ -324,6 +324,30 @@ export class MoleculeRenderer {
     return this.data;
   }
 
+  /** Tint every atom's material toward ice-blue so frozen seed waters
+   *  are visually distinguishable from liquid molecules. Also bumps the
+   *  emissive a little so the crystal glows faintly against the darker
+   *  surrounding water. No-op if already applied. */
+  public setFrozenTint(frozen: boolean): void {
+    const iceTint = new THREE.Color(0x5db6ff);  // cold cyan-blue
+    const emissive = new THREE.Color(0x0a2a55); // subtle glow
+    for (const mesh of this.atomMeshes) {
+      const mat = mesh.material as THREE.MeshPhongMaterial;
+      if (frozen) {
+        // Blend original element color 60% toward the ice tint.
+        const atom = (mesh.userData as any).atom as AtomData;
+        const base = new THREE.Color(ELEMENT_COLORS[atom.element] ?? 0xffffff);
+        mat.color.copy(base).lerp(iceTint, 0.6);
+        mat.emissive.copy(emissive);
+      } else {
+        const atom = (mesh.userData as any).atom as AtomData;
+        mat.color.setHex(ELEMENT_COLORS[atom.element] ?? 0xff00ff);
+        mat.emissive.setHex(0x000000);
+      }
+      mat.needsUpdate = true;
+    }
+  }
+
   /** Update atom positions from physics engine (flat array [x0,y0,z0,...]) */
   public updateAtomPositions(positions: number[]): void {
     for (let i = 0; i < this.atomMeshes.length && i * 3 + 2 < positions.length; i++) {

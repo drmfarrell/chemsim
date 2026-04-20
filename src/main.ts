@@ -144,8 +144,8 @@ let tutorial: Tutorial;
 
 // Graph data for tracking box size and NN distance over time
 const MAX_GRAPH_POINTS = 200;
-let graphHistory: { boxSize: number; nnDist: number; step: number }[] = [];
-let showGraph = false;
+let graphHistory: { nnDist: number; omega: number; timePs: number }[] = [];
+let showGraph = true;
 
 // Incremented on each load; in-flight loads whose token is stale bail out
 // so overlapping load calls cannot both commit and strand meshes in the scene.
@@ -727,7 +727,7 @@ function setupUI(): void {
     console.log(`Added NaCl crystal with ${ionCount} ions`);
   });
 
-  // Graph toggle
+  // Graph toggle (default: on — see index.html's #graph-container/display).
   const graphBtn = document.getElementById('toggle-graph') as HTMLButtonElement;
   const graphContainer = document.getElementById('graph-container') as HTMLDivElement;
   graphBtn.addEventListener('click', () => {
@@ -735,11 +735,12 @@ function setupUI(): void {
     if (showGraph) {
       graphContainer.style.display = 'block';
       graphBtn.textContent = 'Hide Graph';
-      // Clear history when showing graph
+      graphBtn.classList.add('active');
       graphHistory = [];
     } else {
       graphContainer.style.display = 'none';
       graphBtn.textContent = 'Show Graph';
+      graphBtn.classList.remove('active');
     }
   });
 
@@ -1157,9 +1158,16 @@ function updateMode2Stats(): void {
     if (simPE) simPE.textContent = `${pe.toFixed(1)} kJ/mol`;
     if (simNN) simNN.textContent = `${nnDist.toFixed(2)} \u00C5`;
 
-    // Add to graph history
+    // Add to graph history. Ordering front: mean |ω| of the non-frozen
+    // ("liquid") molecules. Drops as water molecules orient into the
+    // H-bond network and stop tumbling — a freezing order parameter.
     if (showGraph) {
-      graphHistory.push({ boxSize, nnDist, step });
+      const dtFs = parseFloat(
+        (document.getElementById('timestep-slider') as HTMLInputElement).value,
+      );
+      const timePs = (Number(step) * dtFs) / 1000;
+      const omega = physics.get_mean_angular_speed_liquid();
+      graphHistory.push({ nnDist, omega, timePs });
       if (graphHistory.length > MAX_GRAPH_POINTS) {
         graphHistory.shift();
       }
@@ -1178,65 +1186,59 @@ function drawGraph(): void {
   const width = canvas.width;
   const height = canvas.height;
 
-  // Clear canvas
   ctx.fillStyle = '#1a1a2e';
   ctx.fillRect(0, 0, width, height);
-
-  // Find min/max for scaling
-  const allSizes = graphHistory.map(d => d.boxSize);
-  const allNN = graphHistory.map(d => d.nnDist);
-  const minVal = Math.min(...allSizes, ...allNN) * 0.95;
-  const maxVal = Math.max(...allSizes, ...allNN) * 1.05;
 
   const padding = 20;
   const graphWidth = width - padding * 2;
   const graphHeight = height - padding * 2;
 
-  // Draw grid lines
+  // Grid lines
   ctx.strokeStyle = '#333';
   ctx.lineWidth = 1;
   for (let i = 0; i <= 4; i++) {
     const y = padding + (graphHeight / 4) * i;
-    ctx.beginPath();
-    ctx.moveTo(padding, y);
-    ctx.lineTo(width - padding, y);
-    ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(padding, y); ctx.lineTo(width - padding, y); ctx.stroke();
   }
 
-  // Helper to convert value to Y coordinate
-  const toY = (val: number) => height - padding - ((val - minVal) / (maxVal - minVal)) * graphHeight;
   const toX = (index: number) => padding + (index / (MAX_GRAPH_POINTS - 1)) * graphWidth;
 
-  // Draw box size line (green)
-  ctx.strokeStyle = '#4f8';
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  graphHistory.forEach((data, i) => {
-    const x = toX(i);
-    const y = toY(data.boxSize);
-    if (i === 0) ctx.moveTo(x, y);
-    else ctx.lineTo(x, y);
-  });
-  ctx.stroke();
+  // Two independent series with their own Y axes so NN (≈3 Å) and
+  // angular speed (≈0–15 rad/ps) are both legible on one canvas.
+  function drawSeries(
+    values: number[],
+    color: string,
+    lo: number,
+    hi: number,
+    labelFmt: (v: number) => string,
+    labelOffset: number,
+  ) {
+    const toY = (val: number) => height - padding - ((val - lo) / (hi - lo)) * graphHeight;
+    ctx!.strokeStyle = color;
+    ctx!.lineWidth = 2;
+    ctx!.beginPath();
+    values.forEach((v, i) => {
+      const x = toX(i), y = toY(v);
+      if (i === 0) ctx!.moveTo(x, y); else ctx!.lineTo(x, y);
+    });
+    ctx!.stroke();
+    const last = values[values.length - 1];
+    ctx!.fillStyle = color;
+    ctx!.font = '10px monospace';
+    ctx!.fillText(labelFmt(last), width - 60, toY(last) + labelOffset);
+  }
 
-  // Draw NN distance line (red)
-  ctx.strokeStyle = '#f84';
-  ctx.beginPath();
-  graphHistory.forEach((data, i) => {
-    const x = toX(i);
-    const y = toY(data.nnDist);
-    if (i === 0) ctx.moveTo(x, y);
-    else ctx.lineTo(x, y);
-  });
-  ctx.stroke();
+  const nnSeries = graphHistory.map(d => d.nnDist);
+  const omegaSeries = graphHistory.map(d => d.omega);
 
-  // Draw current values
-  const lastData = graphHistory[graphHistory.length - 1];
-  ctx.fillStyle = '#4f8';
-  ctx.font = '10px monospace';
-  ctx.fillText(`${lastData.boxSize.toFixed(1)}Å`, width - 50, toY(lastData.boxSize) - 5);
-  ctx.fillStyle = '#f84';
-  ctx.fillText(`${lastData.nnDist.toFixed(2)}Å`, width - 50, toY(lastData.nnDist) + 12);
+  // NN dist scale: wrap the actual min/max with a little headroom.
+  const nnLo = Math.min(...nnSeries) * 0.97;
+  const nnHi = Math.max(...nnSeries) * 1.03;
+  drawSeries(nnSeries, '#f84', nnLo, nnHi, v => `${v.toFixed(2)} Å`, -5);
+
+  // Angular-speed scale: pinned to 0 so a drop is visually unmistakable.
+  const omegaHi = Math.max(...omegaSeries, 5) * 1.1;
+  drawSeries(omegaSeries, '#6af', 0, omegaHi, v => `${v.toFixed(2)} rad/ps`, 12);
 }
 
 function updateInteractionNetwork(): void {
@@ -1463,6 +1465,7 @@ function addIceSeed(
     // Three.js Quaternion uses (x, y, z, w); physics engine uses (w, x, y, z).
     group.quaternion.set(w.quaternion[1], w.quaternion[2], w.quaternion[3], w.quaternion[0]);
     renderer.setCloudVisible(cloudOn);
+    renderer.setFrozenTint(true);
     sceneManager.scene.add(group);
     boxMolecules.push(renderer);
     placed++;
