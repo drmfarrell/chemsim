@@ -133,6 +133,48 @@ def main():
 
     print()
     print("=" * 80)
+    print("SECTION 1b: Cross-molecule pair-energy matrix")
+    print("All non-water molecule pairs at 3 center-to-center distances.")
+    print("=" * 80)
+
+    ours_pairs = {
+        (p["a"], p["b"], p["d"]): p["energy_kJ_mol"]
+        for p in ours.get("pair_energies", [])
+    }
+    ref_pairs = {
+        (p["a"], p["b"], p["d"]): p["energy_kJ_mol"]
+        for p in ref.get("pair_energies", [])
+    }
+
+    keys = sorted(set(ours_pairs) & set(ref_pairs))
+    missing_ours = sorted(set(ref_pairs) - set(ours_pairs))
+    missing_ref = sorted(set(ours_pairs) - set(ref_pairs))
+    pair_fail = 0
+    pair_pass = 0
+    for k in keys:
+        o = ours_pairs[k]
+        r = ref_pairs[k]
+        diff = abs(o - r)
+        # 1% relative, or 0.01 kJ/mol absolute (tight — same-model same-math).
+        if abs(r) > 1e-6:
+            ok = (diff / abs(r)) < 0.01 or diff < 0.01
+        else:
+            ok = diff < 0.01
+        if ok:
+            pair_pass += 1
+        else:
+            pair_fail += 1
+            print(f"  [FAIL] {k[0]} vs {k[1]} d={k[2]:.1f} A: ours={o:+.4f}  ref={r:+.4f}  diff={diff:.4f}")
+    print(f"  Pair-energy checks: {pair_pass}/{pair_pass + pair_fail} passed")
+    if missing_ours:
+        print(f"  [SKIP] {len(missing_ours)} pairs in reference but not ours: {missing_ours[:3]}...")
+    if missing_ref:
+        print(f"  [SKIP] {len(missing_ref)} pairs in ours but not reference: {missing_ref[:3]}...")
+    if pair_fail > 0:
+        all_pass = False
+
+    print()
+    print("=" * 80)
     print("SECTION 2: Model fidelity (our classical TIP3P/OPLS vs QM/experiment)")
     print("These are expected to differ: TIP3P is a simplified classical model.")
     print("Reported deltas are informational, not pass/fail.")

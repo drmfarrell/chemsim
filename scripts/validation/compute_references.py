@@ -15,6 +15,7 @@ Reference quantities:
 7. Water-methane interaction energy
 """
 
+import glob
 import json
 import math
 import os
@@ -143,15 +144,16 @@ def classical_coulomb_lj_energy(
     return e_coul + e_lj, e_coul, e_lj
 
 
-# LJ parameters matching our src/utils/constants.ts LJ_PARAMS
+# LJ parameters matching our src/utils/constants.ts LJ_PARAMS. Keep in sync.
 LJ_PARAMS = {
-    "H":  (0.01,   2.50),   # matches our updated H epsilon
+    "H":  (0.01,   2.50),
     "C":  (0.4577, 3.40),
     "N":  (0.7113, 3.25),
     "O":  (0.6502, 3.12),
     "F":  (0.2552, 2.95),
     "S":  (1.0460, 3.55),
     "Cl": (1.1088, 3.47),
+    "Na": (0.3659, 2.4393),  # Joung-Cheatham 2008, TIP3P set (ion default)
 }
 
 
@@ -390,6 +392,104 @@ def water_esp_at_probes():
 
 
 # ---------------------------------------------------------------------------
+# Cross-molecule pair-energy matrix
+#
+# Load every molecule JSON in src/data/molecules/, then for each unordered
+# pair (including self-self) compute the classical Coulomb + LJ interaction
+# energy at three fixed center-to-center displacements along +x. Matches the
+# Rust engine's get_potential_energy() on a two-molecule SimulationSystem,
+# so any per-element LJ or charge drift between the Python reference and
+# the TS data tables (src/data/molecules/*.json + src/utils/constants.ts)
+# surfaces as a per-pair discrepancy rather than averaging out.
+#
+# Molecules with virtual sites (TIP4P water M-site) are excluded because
+# the engine's get_potential_energy() iterates mol.atoms only and skips
+# virtual_sites; a like-for-like comparison would need both sides to agree
+# on whether to include the M-site. Water is already covered extensively
+# in Sections 1-5.
+# ---------------------------------------------------------------------------
+
+PAIR_ENERGY_DISTANCES_A = [3.0, 5.0, 8.0]
+
+
+def load_all_molecule_jsons():
+    """Load every src/data/molecules/*.json, returning a dict keyed by
+    filename stem (e.g. 'methane'). Each value carries the atom tuples
+    in the format pair_interaction_energy() expects."""
+    root = os.path.join(os.path.dirname(__file__), "..", "..", "src", "data", "molecules")
+    molecules = {}
+    for path in sorted(glob.glob(os.path.join(root, "*.json"))):
+        name = os.path.splitext(os.path.basename(path))[0]
+        with open(path) as f:
+            data = json.load(f)
+        atoms = []
+        for a in data["atoms"]:
+            eps = a.get("epsilon")
+            sigma = a.get("sigma")
+            if eps is None or sigma is None:
+                lj = LJ_PARAMS.get(a["element"], (0.5, 3.0))
+                eps = lj[0] if eps is None else eps
+                sigma = lj[1] if sigma is None else sigma
+            atoms.append((
+                a["element"], a["x"], a["y"], a["z"],
+                a["charge"], eps, sigma,
+            ))
+        molecules[name] = {
+            "atoms": atoms,
+            "has_virtual_site": bool(data.get("virtual_sites")),
+        }
+    return molecules
+
+
+def pair_interaction_energy(atoms_a, atoms_b, dx, dy=0.0, dz=0.0):
+    """Classical Coulomb + LJ between atoms_a (at rest) and atoms_b
+    (displaced by dx, dy, dz). Same Lorentz-Berthelot mixing and the
+    same kernels the engine's coulomb_energy / lj_energy use."""
+    e_total = 0.0
+    for _ea, ax, ay, az, aq, ae, asg in atoms_a:
+        for _eb, bx_, by_, bz_, bq, be_, bsg in atoms_b:
+            rx = (bx_ + dx) - ax
+            ry = (by_ + dy) - ay
+            rz = (bz_ + dz) - az
+            r2 = rx * rx + ry * ry + rz * rz
+            if r2 < 1e-8:
+                continue
+            r = math.sqrt(r2)
+            e_total += COULOMB_K_KJ_A * aq * bq / r
+            if ae > 1e-10 and be_ > 1e-10:
+                sigma = (asg + bsg) / 2.0
+                eps = math.sqrt(ae * be_)
+                s6 = (sigma * sigma / r2) ** 3
+                s12 = s6 * s6
+                e_total += 4.0 * eps * (s12 - s6)
+    return e_total
+
+
+def compute_pair_energy_matrix():
+    """Build the full unordered-pair × distance energy matrix. Skips
+    virtual-site molecules (water). Returns list of dicts, one per
+    (a, b, d) triple."""
+    mols = load_all_molecule_jsons()
+    names = sorted(mols.keys())
+    checks = []
+    for i, ni in enumerate(names):
+        if mols[ni]["has_virtual_site"]:
+            continue
+        for nj in names[i:]:
+            if mols[nj]["has_virtual_site"]:
+                continue
+            for d in PAIR_ENERGY_DISTANCES_A:
+                e = pair_interaction_energy(
+                    mols[ni]["atoms"], mols[nj]["atoms"], dx=d,
+                )
+                checks.append({
+                    "a": ni, "b": nj, "d": d,
+                    "energy_kJ_mol": float(e),
+                })
+    return checks
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -463,6 +563,12 @@ def main():
         "lj_kJ_mol": float(e_lj),
     }
     print(f"    H2O-CH4 at 4A: {e_tot:.2f} kJ/mol (LJ={e_lj:.2f}, Coulomb={e_c:.2f})")
+
+    print("[7/7] Cross-molecule pair-energy matrix (non-water) ...")
+    pair_energies = compute_pair_energy_matrix()
+    results["pair_energies"] = pair_energies
+    print(f"    {len(pair_energies)} pair-energy checks "
+          f"({len(PAIR_ENERGY_DISTANCES_A)} distances each)")
 
     # Write output
     out_path = "results/validation/reference_values.json"

@@ -18,6 +18,9 @@
 use chemsim_physics::{Atom, Molecule, SimulationSystem};
 use std::fs::{create_dir_all, File};
 use std::io::Write;
+use std::path::Path;
+
+use serde::Deserialize;
 
 // Reproduce the same geometries used in compute_references.py.
 fn water_atoms_local() -> Vec<(&'static str, f64, f64, f64, f64)> {
@@ -111,6 +114,128 @@ fn add_to_system(sys: &mut SimulationSystem, atoms_data: &[(&str, f64, f64, f64,
         atom_json
     );
     sys.add_molecule(&input).expect("add_molecule");
+}
+
+// ---------------------------------------------------------------------------
+// Cross-molecule pair-energy matrix. Loads every src/data/molecules/*.json,
+// mirrors the Python reference script, and drives SimulationSystem for each
+// unordered pair at three separations. Writing into the main validation JSON
+// lets compare.py diff per-pair energies.
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct JsonAtom {
+    element: String,
+    x: f64,
+    y: f64,
+    z: f64,
+    charge: f64,
+    #[serde(default)]
+    epsilon: Option<f64>,
+    #[serde(default)]
+    sigma: Option<f64>,
+    #[serde(default)]
+    mass: Option<f64>,
+}
+
+#[derive(Deserialize)]
+struct JsonMolecule {
+    atoms: Vec<JsonAtom>,
+    #[serde(default)]
+    polarizability: Option<f64>,
+    #[serde(default)]
+    virtual_sites: Vec<serde_json::Value>,
+}
+
+struct LoadedMolecule {
+    name: String,
+    /// Raw atom list with LJ + mass defaults resolved. Kept as tuples so we
+    /// can emit a fresh JSON at any displacement without reparsing.
+    atoms: Vec<(String, f64, f64, f64, f64, f64, f64, f64)>,
+    polarizability: f64,
+    has_virtual_site: bool,
+}
+
+impl LoadedMolecule {
+    /// Emit the engine-expected JSON with every atom's x coordinate shifted
+    /// by `dx`. We displace atoms directly (not via set_molecule_position /
+    /// COM) so pair energies match the Python reference which does the same.
+    fn json_at(&self, dx: f64) -> String {
+        let mut out = String::from("{\"atoms\":[");
+        for (i, (elem, x, y, z, q, eps, sig, m)) in self.atoms.iter().enumerate() {
+            if i > 0 { out.push(','); }
+            out.push_str(&format!(
+                "{{\"element\":\"{}\",\"x\":{},\"y\":{},\"z\":{},\"charge\":{},\"epsilon\":{},\"sigma\":{},\"mass\":{}}}",
+                elem, x + dx, y, z, q, eps, sig, m,
+            ));
+        }
+        out.push_str(&format!("],\"polarizability\":{}}}", self.polarizability));
+        out
+    }
+}
+
+fn load_molecule_for_engine(path: &Path) -> Option<LoadedMolecule> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let parsed: JsonMolecule = serde_json::from_str(&text).ok()?;
+    let name = path.file_stem()?.to_str()?.to_string();
+    let has_vs = !parsed.virtual_sites.is_empty();
+
+    // Resolve LJ + mass defaults. These mirror src/utils/constants.ts —
+    // keep in sync with the Python LJ_PARAMS table.
+    let atoms: Vec<_> = parsed.atoms.iter().map(|a| {
+        let (def_eps, def_sig) = lj(&a.element);
+        (
+            a.element.clone(),
+            a.x, a.y, a.z, a.charge,
+            a.epsilon.unwrap_or(def_eps),
+            a.sigma.unwrap_or(def_sig),
+            a.mass.unwrap_or_else(|| mass(&a.element)),
+        )
+    }).collect();
+
+    Some(LoadedMolecule {
+        name,
+        atoms,
+        polarizability: parsed.polarizability.unwrap_or(1.0),
+        has_virtual_site: has_vs,
+    })
+}
+
+fn compute_pair_energy_matrix() -> Vec<(String, String, f64, f64)> {
+    let root = Path::new("../../src/data/molecules");
+    let mut mols: Vec<LoadedMolecule> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(root) {
+        let mut paths: Vec<_> = entries.filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("json"))
+            .collect();
+        paths.sort();
+        for p in paths {
+            if let Some(m) = load_molecule_for_engine(&p) { mols.push(m); }
+        }
+    }
+
+    let distances = [3.0, 5.0, 8.0];
+    let mut out = Vec::new();
+    for i in 0..mols.len() {
+        if mols[i].has_virtual_site { continue; }
+        for j in i..mols.len() {
+            if mols[j].has_virtual_site { continue; }
+            for &d in &distances {
+                let mut sys = SimulationSystem::new();
+                // Wide cutoff so all pair distances are inside.
+                sys.set_cutoff(50.0);
+                sys.set_periodic(false);
+                sys.set_thermostat(false);
+                sys.set_barostat(false);
+
+                let _ = sys.add_molecule(&mols[i].json_at(0.0));
+                let _ = sys.add_molecule(&mols[j].json_at(d));
+                let e = sys.get_potential_energy();
+                out.push((mols[i].name.clone(), mols[j].name.clone(), d, e));
+            }
+        }
+    }
+    out
 }
 
 // Coulomb + LJ energy between two independent atom lists at fixed positions.
@@ -297,7 +422,10 @@ fn validation_main() {
     let b_ch4_wm = translate_atoms(&a_ch4, 4.0, 0.0, 0.0);
     let (wm_tot, wm_c, wm_lj) = pairwise_energy(&water_a, &b_ch4_wm);
 
-    // --- 8. LJ potential sanity: two Ar-like atoms at LJ minimum ---
+    // --- 8. Cross-molecule pair-energy matrix ---
+    let pair_energies = compute_pair_energy_matrix();
+
+    // --- 9. LJ potential sanity: two Ar-like atoms at LJ minimum ---
     // Use O-O params to match the spec's test.
     let sigma_o = 3.12;
     let eps_o = 0.6502;
@@ -340,6 +468,12 @@ fn validation_main() {
     writeln!(f, "  }},").unwrap();
     writeln!(f, "  \"methane_dimer_4A\": {{\"total_kJ_mol\": {}, \"coulomb_kJ_mol\": {}, \"lj_kJ_mol\": {}}},", ch4_tot, ch4_c, ch4_lj).unwrap();
     writeln!(f, "  \"water_methane_4A\": {{\"total_kJ_mol\": {}, \"coulomb_kJ_mol\": {}, \"lj_kJ_mol\": {}}},", wm_tot, wm_c, wm_lj).unwrap();
+    writeln!(f, "  \"pair_energies\": [").unwrap();
+    for (i, (a, b, d, e)) in pair_energies.iter().enumerate() {
+        let sep = if i + 1 == pair_energies.len() { "" } else { "," };
+        writeln!(f, "    {{\"a\":\"{}\",\"b\":\"{}\",\"d\":{},\"energy_kJ_mol\":{}}}{}", a, b, d, e, sep).unwrap();
+    }
+    writeln!(f, "  ],").unwrap();
     writeln!(f, "  \"lj_minimum_test\": {{\"expected_eps\": {}, \"actual\": {}, \"r_min_expected\": {}}}", eps_o, lj_min, r_min).unwrap();
     writeln!(f, "}}").unwrap();
 

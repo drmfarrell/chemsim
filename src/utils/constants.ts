@@ -13,7 +13,10 @@ export const LJ_PARAMS: Record<string, { epsilon: number; sigma: number }> = {
   F:  { epsilon: 0.2552, sigma: 2.95 },
   S:  { epsilon: 1.0460, sigma: 3.55 },
   Cl: { epsilon: 1.1088, sigma: 3.47 },
-  Na: { epsilon: 0.4577, sigma: 2.80 }, // Approximate for Na+
+  // Na+ (Joung-Cheatham 2008, TIP3P set). The codebase only uses sodium as
+  // Na+, and sodium_ion.json carries the same values as an explicit override
+  // so this fallback is mostly belt-and-suspenders.
+  Na: { epsilon: 0.3659, sigma: 2.4393 },
 };
 
 // Ionic radii for charged species (Angstroms) - used for rendering ions
