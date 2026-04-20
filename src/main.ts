@@ -80,6 +80,13 @@ let activeIceSeedExperiment: boolean = false;
 let pendingSecondSpecies: string | null = null;
 let pendingSecondCount: number = 0;
 
+// Last experiment loaded via the dropdown/handler. Used by the Reset
+// button so clicking Reset mid-experiment restarts that experiment
+// (ice seed, secondary species, and all), not just a vanilla mono-
+// species box. Cleared when the user manually switches species or
+// mode so a subsequent Reset reloads the vanilla current setup.
+let lastExperimentId: string | null = null;
+
 // Molecule indices of frozen waters (seed + auto-promoted) currently
 // carrying the ice-blue tint. Transitions in is_frozen are synced to
 // setFrozenTint each animation frame. Reset on every new Mode-2 load.
@@ -352,6 +359,11 @@ function setupUI(): void {
   // Mode selector
   const modeSelector = document.getElementById('mode-selector') as HTMLSelectElement;
   modeSelector.addEventListener('change', () => {
+    // User is deliberately leaving any experiment's setup behind.
+    lastExperimentId = null;
+    activeIceSeedExperiment = false;
+    pendingSecondSpecies = null;
+    pendingSecondCount = 0;
     switchMode(modeSelector.value as 'mode1' | 'mode2');
   });
 
@@ -365,10 +377,14 @@ function setupUI(): void {
   const selA = document.getElementById('molecule-a-selector') as HTMLSelectElement;
   const selB = document.getElementById('molecule-b-selector') as HTMLSelectElement;
   const reloadForSelectorChange = () => {
+    // Manual species change drops us out of any active experiment so
+    // that subsequent Reset clicks reload the vanilla selected species
+    // rather than replaying the original experiment.
+    lastExperimentId = null;
+    activeIceSeedExperiment = false;
+    pendingSecondSpecies = null;
+    pendingSecondCount = 0;
     if (currentMode === 'mode2') {
-      // Switching molecule mid-experiment drops us out of any
-      // experiment-specific setup (ice seed, etc.) by design.
-      activeIceSeedExperiment = false;
       const countSliderEl = document.getElementById('molecule-count-slider') as HTMLInputElement;
       const idx = parseInt(countSliderEl.value);
       loadMode2(selA.value, MOLECULE_COUNT_PRESETS[idx]);
@@ -470,6 +486,30 @@ function setupUI(): void {
   // Mode 2: Play/Pause — all UI + pool state change lives in setSimRunning.
   document.getElementById('toggle-sim-play')!.addEventListener('click', () => {
     setSimRunning(!isSimulationRunning);
+  });
+
+  // Mode 2: Reset — rebuild the box from scratch. If an experiment is
+  // currently active (ice-seed freezing, a binary mixture demo, …),
+  // re-run it exactly. Otherwise reload the vanilla current species at
+  // the current count slider value.
+  document.getElementById('sim-reset')!.addEventListener('click', () => {
+    if (lastExperimentId) {
+      const exp = EXPERIMENTS.find(e => e.id === lastExperimentId);
+      if (exp) {
+        loadExperiment(exp);
+        return;
+      }
+    }
+    if (currentMode === 'mode2') {
+      const selAEl = document.getElementById('molecule-a-selector') as HTMLSelectElement;
+      const countSliderEl = document.getElementById('molecule-count-slider') as HTMLInputElement;
+      const idx = parseInt(countSliderEl.value);
+      loadMode2(selAEl.value, MOLECULE_COUNT_PRESETS[idx]);
+    } else {
+      const selAEl = document.getElementById('molecule-a-selector') as HTMLSelectElement;
+      const selBEl = document.getElementById('molecule-b-selector') as HTMLSelectElement;
+      loadMode1Pair(selAEl.value, selBEl.value);
+    }
   });
 
   // Also park workers when the tab is backgrounded — no point burning
@@ -897,6 +937,8 @@ function setupUI(): void {
 }
 
 function loadExperiment(exp: Experiment): void {
+  // Remember the experiment so the Reset button can replay it verbatim.
+  lastExperimentId = exp.id;
   // Show experiment prompt
   const promptEl = document.getElementById('experiment-prompt');
   const promptText = document.getElementById('experiment-prompt-text');
