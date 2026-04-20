@@ -223,6 +223,54 @@ impl SimulationSystem {
         self.molecules.get(idx).map(|m| m.is_frozen).unwrap_or(false)
     }
 
+    /// Scan for ions (single-atom molecules with |charge| > 0.5) and
+    /// unfreeze any frozen water whose atoms sit within `threshold`
+    /// Angstroms of an ion. This simulates local melting at the
+    /// dissolution front: as Na+ and Cl- approach the ice seed, the
+    /// surface layer of seed waters goes back into normal dynamics and
+    /// can be pulled away by the ions' Coulomb field.
+    ///
+    /// Call from the JS animation loop before each `step_n`. Returns
+    /// the number of newly-unfrozen molecules this call so the
+    /// renderer knows how many tints to clear.
+    pub fn unfreeze_near_ions(&mut self, threshold: f64) -> u32 {
+        // Gather ion positions (single-atom, |q| > 0.5). Cheap — usually
+        // a few dozen at most.
+        let mut ion_positions: Vec<(f64, f64, f64)> = Vec::new();
+        for mol in &self.molecules {
+            if mol.atoms.len() == 1 && mol.atoms[0].charge.abs() > 0.5 {
+                ion_positions.push((mol.atoms[0].x, mol.atoms[0].y, mol.atoms[0].z));
+            }
+        }
+        if ion_positions.is_empty() { return 0; }
+
+        let thr2 = threshold * threshold;
+        let mut to_thaw: Vec<usize> = Vec::new();
+        for (i, mol) in self.molecules.iter().enumerate() {
+            if !mol.is_frozen { continue; }
+            let mut close = false;
+            'outer: for a in &mol.atoms {
+                for &(ix, iy, iz) in &ion_positions {
+                    let dx = a.x - ix;
+                    let dy = a.y - iy;
+                    let dz = a.z - iz;
+                    if dx * dx + dy * dy + dz * dz < thr2 {
+                        close = true;
+                        break 'outer;
+                    }
+                }
+            }
+            if close { to_thaw.push(i); }
+        }
+
+        let n = to_thaw.len() as u32;
+        // Leave velocities at zero — thermostat + neighbor forces
+        // accelerate them within a few steps. Flipping is_frozen off
+        // is enough to put them back in the integrator's hands.
+        for i in to_thaw { self.molecules[i].is_frozen = false; }
+        n
+    }
+
     /// Freeze or unfreeze a single molecule. Frozen molecules keep their
     /// velocities at zero and are skipped by the position, velocity, and
     /// rotation integrators plus the thermostat. Pair forces are still

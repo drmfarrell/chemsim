@@ -70,6 +70,12 @@ let currentWaterModelId: string = DEFAULT_WATER_MODEL_ID;
 // dropping the crystal in. Reset when the user changes molecule, count,
 // or model so subsequent Mode-2 loads don't unexpectedly seed.
 let activeIceSeedExperiment: boolean = false;
+
+// Molecule indices of frozen seed waters currently carrying the ice-blue
+// tint. When unfreeze_near_ions flips one of these back to liquid we
+// clear its renderer tint too and drop the index here. Reset each time
+// a new Mode-2 box is loaded.
+const seedTinted: Set<number> = new Set();
 let boxGroup: THREE.Group | null = null;
 let boxHelper: THREE.LineSegments | null = null;
 // Box side length (in Angstroms) that the boxHelper geometry was built for;
@@ -1073,6 +1079,23 @@ function updateMode2(_dt: number): void {
     physics.step_n(stepsPerFrame);
     effectiveSpeedMultiplier = simSpeedMultiplier;
 
+    // Local melting: whenever an ion approaches a frozen seed water,
+    // flip that water's is_frozen off so it can be dissolved away.
+    // 4.5 Å catches the first hydration shell (Na-O ≈ 2.4, Cl-H ≈ 2.3,
+    // plus a buffer) without prematurely melting waters across the box.
+    const thawed = physics.unfreeze_near_ions(4.5);
+    if (thawed > 0) {
+      // Sync tints for any seed water that just transitioned. Only the
+      // ones that were previously tinted need updating.
+      for (let i = 0; i < boxMolecules.length; i++) {
+        const nowFrozen = physics.is_molecule_frozen(i);
+        if (!nowFrozen && seedTinted.has(i)) {
+          boxMolecules[i].setFrozenTint(false);
+          seedTinted.delete(i);
+        }
+      }
+    }
+
     // Resize the wireframe box to match the current physics box (the
     // barostat changes box_size each step). Scaling the existing
     // LineSegments object avoids reallocating edge geometry every frame.
@@ -1468,6 +1491,7 @@ function addIceSeed(
     renderer.setFrozenTint(true);
     sceneManager.scene.add(group);
     boxMolecules.push(renderer);
+    seedTinted.add(molIdx);
     placed++;
   }
   return { placed, oxygens };
@@ -1696,6 +1720,7 @@ function clearMode2(): void {
     mol.dispose();
   }
   boxMolecules = [];
+  seedTinted.clear();
 
   if (boxHelper) {
     sceneManager.scene.remove(boxHelper);
