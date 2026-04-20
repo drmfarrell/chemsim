@@ -7,6 +7,7 @@ import { VRManager } from './scene/VRManager';
 import { loadMolecule, MoleculeData, MOLECULE_LIST } from './utils/loader';
 import { LJ_PARAMS, ANGSTROM_TO_SCENE, DEFAULT_TEMPERATURE, DEFAULT_MOLECULE_COUNT } from './utils/constants';
 import { Tutorial } from './ui/Tutorial';
+import { AskPanel } from './ui/AskPanel';
 import { EXPERIMENTS, Experiment } from './ui/Experiments';
 import {
   WATER_MODELS,
@@ -280,6 +281,32 @@ async function main() {
 
   // Set up mouse/touch interaction
   setupInteraction();
+
+  // Wire up the Ask panel — sim-state snapshot + LLM chat. Pulls current
+  // mode / species / T / experiment etc. each time the user asks.
+  new AskPanel(() => {
+    const dtFs = parseFloat(
+      (document.getElementById('timestep-slider') as HTMLInputElement | null)?.value ?? '3',
+    );
+    const tempSlider = document.getElementById('temp-slider') as HTMLInputElement | null;
+    const exp = lastExperimentId ? EXPERIMENTS.find(e => e.id === lastExperimentId) : null;
+    const stepCount = Number(physics?.get_step_count?.() ?? 0);
+    return {
+      mode: currentMode,
+      primarySpecies: boxMoleculeData?.name ?? moleculeAData?.name,
+      count: currentMode === 'mode2' ? boxMolecules.length : 2,
+      temperatureK: tempSlider ? parseFloat(tempSlider.value) : undefined,
+      waterModel: currentWaterModelId,
+      experimentId: lastExperimentId,
+      experimentTitle: exp?.title ?? null,
+      iceSeedActive: seedTinted.size > 0,
+      frozenCount: seedTinted.size,
+      boxSizeA: physics?.get_box_size?.(),
+      timePs: (stepCount * dtFs) / 1000,
+      timestepFs: dtFs,
+      stepCount,
+    };
+  }).init();
 
   // Load initial molecules
   await loadMode1Pair('water', 'water');

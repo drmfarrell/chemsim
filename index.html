@@ -172,6 +172,70 @@
       z-index: 20;
     }
 
+    /* Ask (chemistry tutor) button + floating panel, bottom-right.
+       Same visual language as the Advanced popup so the two read as a pair. */
+    #ask-btn {
+      position: absolute;
+      bottom: 16px;
+      right: 16px;
+      background: rgba(20, 20, 30, 0.85);
+      backdrop-filter: blur(8px);
+      color: #e0e0e0;
+      border: 1px solid rgba(255,255,255,0.15);
+      border-radius: 8px;
+      padding: 8px 14px;
+      font-size: 14px;
+      cursor: pointer;
+      width: auto;
+      margin: 0;
+      box-shadow: 0 4px 24px rgba(0,0,0,0.3);
+      z-index: 15;
+    }
+    #ask-btn:hover { background: rgba(30, 30, 50, 0.9); }
+    #ask-panel {
+      position: absolute;
+      bottom: 60px;
+      right: 16px;
+      width: 380px;
+      max-height: 70vh;
+      overflow-y: auto;
+      background: rgba(20, 20, 30, 0.95);
+      backdrop-filter: blur(8px);
+      border-radius: 12px;
+      padding: 14px 16px;
+      color: #e0e0e0;
+      font-size: 13px;
+      box-shadow: 0 4px 24px rgba(0,0,0,0.4);
+      border: 1px solid rgba(80,140,255,0.2);
+      z-index: 20;
+    }
+    #ask-panel textarea, #ask-panel input, #ask-panel select {
+      width: 100%; box-sizing: border-box;
+      background: rgba(0,0,0,0.3); color: #e0e0e0;
+      border: 1px solid rgba(255,255,255,0.15);
+      border-radius: 4px; padding: 6px 8px;
+      font-size: 13px; font-family: inherit;
+    }
+    #ask-response {
+      white-space: pre-wrap;
+      font-size: 13px;
+      line-height: 1.5;
+      color: #d8d8d8;
+      margin-top: 10px;
+      max-height: 40vh;
+      overflow-y: auto;
+    }
+    #ask-context {
+      font-family: monospace;
+      font-size: 11px;
+      color: #888;
+      white-space: pre-wrap;
+      background: rgba(0,0,0,0.2);
+      padding: 6px 8px;
+      border-radius: 4px;
+      margin-top: 6px;
+    }
+
     /* Main-panel hide toggle: thin chevron button hugging the panel's right edge */
     #toggle-main-panel {
       position: absolute;
@@ -441,6 +505,54 @@
            control panel. Collapses the whole panel so the sim can be watched
            full-screen. -->
       <button id="toggle-main-panel" title="Hide/show the control panel">◀</button>
+
+      <!-- Ask: chemistry tutor Q&A, bottom-right floating panel. -->
+      <button id="ask-btn" title="Ask a chemistry tutor about what you're seeing in the sim.">💬 Ask</button>
+      <div id="ask-panel" style="display:none;">
+        <div style="display:flex; justify-content:space-between; align-items:center;">
+          <h3 style="margin:0; font-size:15px;">Ask a Chemistry Tutor</h3>
+          <button id="ask-close" style="background:none; border:none; color:#888; cursor:pointer; font-size:20px; padding:0; width:auto; margin:0;">×</button>
+        </div>
+        <div style="font-size:11px; color:#888; margin-top:4px;">The tutor sees your current simulation state plus your question.</div>
+
+        <div style="margin-top: 10px;">
+          <label style="font-size:11px; color:#aaa;">Your question</label>
+          <textarea id="ask-input" rows="3" placeholder="e.g., Why don't the CCl4 molecules move as much as the water?" style="margin-top:4px;"></textarea>
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-top:6px;">
+            <span style="font-size:11px; color:#666;">Ctrl+Enter to send</span>
+            <button id="ask-submit" style="background: rgba(80,140,255,0.25); border-color: rgba(80,140,255,0.5); padding: 6px 12px; width: auto; margin: 0;">Ask</button>
+          </div>
+        </div>
+
+        <div id="ask-response"></div>
+
+        <details style="margin-top: 10px;">
+          <summary style="cursor:pointer; font-size:12px; color:#aaa;">Sim state sent with your question</summary>
+          <div id="ask-context">(opens when you click Ask)</div>
+        </details>
+
+        <details style="margin-top: 10px;">
+          <summary style="cursor:pointer; font-size:12px; color:#aaa;">Backend &amp; API key</summary>
+          <div style="margin-top: 6px; display: flex; flex-direction: column; gap: 6px;">
+            <label style="font-size:11px; color:#aaa;">Backend</label>
+            <select id="ask-backend">
+              <option value="anthropic">Anthropic (api.anthropic.com)</option>
+              <option value="openai">OpenAI-compatible (Ollama / LM Studio / vLLM / OpenAI)</option>
+            </select>
+            <label style="font-size:11px; color:#aaa;">Endpoint URL</label>
+            <input type="text" id="ask-endpoint" placeholder="https://api.anthropic.com/v1/messages">
+            <label style="font-size:11px; color:#aaa;">API key <span style="color:#666;">(blank = no auth header, useful for local Ollama)</span></label>
+            <input type="password" id="ask-apikey" placeholder="sk-ant-...">
+            <label style="font-size:11px; color:#aaa;">Model</label>
+            <input type="text" id="ask-model" placeholder="claude-haiku-4-5-20251001 / llama3.1:8b">
+            <div style="font-size:11px; color:#888; line-height:1.4; margin-top:4px;">
+              Local setup: run <code>ollama serve</code>, then set backend = OpenAI-compatible,
+              endpoint = <code>http://localhost:11434/v1/chat/completions</code>, model = <code>llama3.1:8b</code>
+              (or <code>qwen2.5:7b</code>, etc.).
+            </div>
+          </div>
+        </details>
+      </div>
 
       <!-- Mode 2 stats panel -->
       <div id="sim-stats" style="display:none;">
