@@ -1089,12 +1089,25 @@ function updateMode2Stats(): void {
   const simTemp = document.getElementById('sim-temperature');
   const simKE = document.getElementById('sim-ke');
   const simStep = document.getElementById('sim-step');
+  const simTime = document.getElementById('sim-time');
   const simPressure = document.getElementById('sim-pressure');
   const simBox = document.getElementById('sim-box-size');
 
   if (simTemp) simTemp.textContent = `${Math.round(temp)} K`;
   if (simKE) simKE.textContent = `${ke.toFixed(1)} kJ/mol`;
   if (simStep) simStep.textContent = step.toString();
+  if (simTime) {
+    // Timestep slider is in fs for legibility; time = steps * dt_fs / 1000 ps.
+    const dtFs = parseFloat(
+      (document.getElementById('timestep-slider') as HTMLInputElement).value,
+    );
+    const timePs = (Number(step) * dtFs) / 1000;
+    simTime.textContent = timePs < 10
+      ? `${timePs.toFixed(2)} ps`
+      : timePs < 1000
+        ? `${timePs.toFixed(1)} ps`
+        : `${(timePs / 1000).toFixed(2)} ns`;
+  }
   if (simPressure) simPressure.textContent = `${pressure.toFixed(1)} bar`;
   if (simBox) simBox.textContent = `${boxSize.toFixed(2)} \u00C5`;
 
