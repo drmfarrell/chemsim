@@ -13,6 +13,11 @@ import {
   DEFAULT_WATER_MODEL_ID,
   suggestModelForTemperature,
 } from './utils/waterModels';
+import {
+  generateIceIhSeed,
+  iceSeedRadius,
+  DEFAULT_SEED_SIZE,
+} from './utils/iceIh';
 import init, {
   SimulationSystem,
   initThreadPool,
@@ -58,6 +63,13 @@ let boxMoleculeData: MoleculeData | null = null;
 // the Advanced panel dropdown lets the user override further. Switching
 // models rebuilds the mode-2 box rather than hot-swapping mid-run.
 let currentWaterModelId: string = DEFAULT_WATER_MODEL_ID;
+
+// Set by loadExperiment if the current demo needs a pre-placed ice seed
+// at the center of the water drop (freezing demo). Consumed once by
+// loadMode2 which carves the seed region out of the liquid grid before
+// dropping the crystal in. Reset when the user changes molecule, count,
+// or model so subsequent Mode-2 loads don't unexpectedly seed.
+let activeIceSeedExperiment: boolean = false;
 let boxGroup: THREE.Group | null = null;
 let boxHelper: THREE.LineSegments | null = null;
 // Box side length (in Angstroms) that the boxHelper geometry was built for;
@@ -603,6 +615,23 @@ function setupUI(): void {
   });
 
   // Mode 2: Add Salt Crystal button - creates a NaCl crystal that water can dissolve
+  document.getElementById('add-ice-seed-btn')!.addEventListener('click', () => {
+    if (currentMode !== 'mode2' || !boxMoleculeData || boxMoleculeData.name.toLowerCase() !== 'water') {
+      alert('Please switch to Mode 2 and load a water simulation first.');
+      return;
+    }
+    if (currentWaterModelId !== 'tip4p-ice') {
+      const ok = confirm(
+        `The current water model (${WATER_MODELS[currentWaterModelId]?.label ?? currentWaterModelId}) ` +
+        `melts below ~${WATER_MODELS[currentWaterModelId]?.meltingPointK ?? 0} K. ` +
+        `An ice seed will melt immediately. Continue anyway?`,
+      );
+      if (!ok) return;
+    }
+    const n = addIceSeed(0, 0, 0);
+    console.log(`Ice seed: ${n} waters placed at center`);
+  });
+
   document.getElementById('add-salt-btn')!.addEventListener('click', async () => {
     if (currentMode !== 'mode2' || !boxMoleculeData || boxMoleculeData.name.toLowerCase() !== 'water') {
       alert('Please switch to Mode 2 and load a water simulation first.');
@@ -802,6 +831,11 @@ function loadExperiment(exp: Experiment): void {
   if (exp.waterModel && WATER_MODELS[exp.waterModel]) {
     setWaterModelId(exp.waterModel, /*rebuild=*/false);
   }
+
+  // Consumed by the first Mode-2 load that runs after this experiment
+  // load; cleared afterwards so a later count/model change doesn't
+  // accidentally re-seed.
+  activeIceSeedExperiment = !!exp.iceSeed;
 
   if (exp.mode === 'mode1') {
     // Set molecule selectors first so switchMode/loadMode1Pair picks up the
@@ -1383,6 +1417,71 @@ function applyActiveWaterModel(data: MoleculeData): MoleculeData {
   return { ...data, atoms, virtual_sites };
 }
 
+/** Place an ice Ih seed crystal at (cx, cy, cz). Each seed water is added to
+ *  both the physics engine and the scene. `overlapMargin` is the radius
+ *  within which caller-placed waters should have been skipped to avoid
+ *  overlaps; the caller is responsible for that carve-out.
+ *
+ *  Returns the number of waters placed. Uses the active water model so the
+ *  seed's charges and LJ match whatever the user has selected — a TIP3P
+ *  seed at 240 K melts immediately (model's Tm ~150 K), so this really
+ *  only does what you want with TIP4P/Ice. */
+function addIceSeed(cx: number, cy: number, cz: number): number {
+  if (!boxMoleculeData || boxMoleculeData.name.toLowerCase() !== 'water') {
+    return 0;
+  }
+  const cloudOn = document.getElementById('toggle-cloud')?.classList.contains('active') ?? true;
+  const { nA, nB, nC } = DEFAULT_SEED_SIZE;
+  const seed = generateIceIhSeed(cx, cy, cz, nA, nB, nC);
+
+  // Canonical water atoms (O, H, H) carry charge/LJ from the active model.
+  // We build a per-seed-water MoleculeData clone by replacing each atom's
+  // position with the corresponding seed position in the water's body
+  // frame (atoms.xyz relative to its own COM). Physics + renderer then
+  // agree on the same rigid-body geometry.
+  const [canonO, canonH1, canonH2] = boxMoleculeData.atoms;
+
+  let placed = 0;
+  for (const w of seed) {
+    const [O, H1, H2] = w.atoms;
+    // Mass-weighted COM (O = 15.999, H = 1.008) — units cancel in ratio.
+    const mO = 15.999, mH = 1.008;
+    const mTotal = mO + 2 * mH;
+    const comX = (mO * O[0] + mH * H1[0] + mH * H2[0]) / mTotal;
+    const comY = (mO * O[1] + mH * H1[1] + mH * H2[1]) / mTotal;
+    const comZ = (mO * O[2] + mH * H1[2] + mH * H2[2]) / mTotal;
+
+    // Body-frame positions (relative to this seed water's COM).
+    const seedData: MoleculeData = {
+      ...boxMoleculeData,
+      atoms: [
+        { ...canonO,  x: O[0]  - comX, y: O[1]  - comY, z: O[2]  - comZ },
+        { ...canonH1, x: H1[0] - comX, y: H1[1] - comY, z: H1[2] - comZ },
+        { ...canonH2, x: H2[0] - comX, y: H2[1] - comY, z: H2[2] - comZ },
+      ],
+    };
+
+    // Physics: atoms end up at world positions (cx_in_call + body_atoms).
+    addMoleculeToPhysics(seedData, comX, comY, comZ);
+
+    // Renderer: body-frame atoms live in the group's local frame; group is
+    // positioned at the COM. Physics will update the quaternion each
+    // frame; we start at identity since the body-frame == current world
+    // frame with the COM subtracted out.
+    const renderer = new MoleculeRenderer(seedData);
+    renderer.getGroup().position.set(
+      comX * ANGSTROM_TO_SCENE,
+      comY * ANGSTROM_TO_SCENE,
+      comZ * ANGSTROM_TO_SCENE,
+    );
+    renderer.setCloudVisible(cloudOn);
+    sceneManager.scene.add(renderer.getGroup());
+    boxMolecules.push(renderer);
+    placed++;
+  }
+  return placed;
+}
+
 function addMoleculeToPhysics(data: MoleculeData, cx: number, cy: number, cz: number): void {
   const atoms = data.atoms.map(a => {
     // Use molecule-specific LJ params if provided, otherwise fall back to element defaults
@@ -1505,6 +1604,14 @@ async function loadMode2(moleculeName: string, count: number): Promise<void> {
     periodicBtn.textContent = 'Solid Walls';
     updateBoxAppearance(true);  // Solid walls appearance
 
+    // If the active experiment wants an ice seed at the center (freezing
+    // demo), we carve out a sphere of that radius from the liquid grid
+    // so the placed seed doesn't overlap with liquid waters. `count` is
+    // the *total* molecule target — seed waters count against it.
+    const wantSeed = activeIceSeedExperiment && isWater
+      && WATER_MODELS[currentWaterModelId]?.id === 'tip4p-ice';
+    const seedR = wantSeed ? iceSeedRadius(DEFAULT_SEED_SIZE.nA, DEFAULT_SEED_SIZE.nB, DEFAULT_SEED_SIZE.nC) : -1;
+
     // Place molecules as a "drop" in the center of the box
     // Calculate the size needed for the molecules at liquid density
     const perSide = Math.ceil(Math.cbrt(count));
@@ -1531,6 +1638,10 @@ async function loadMode2(moleculeName: string, count: number): Promise<void> {
           const y = -dropOffset + spacing * (iy + 0.5) + jitterY;
           const z = -dropOffset + spacing * (iz + 0.5) + jitterZ;
 
+          // Skip grid sites inside the seed bounding sphere — the seed
+          // will occupy the carved-out region.
+          if (wantSeed && (x * x + y * y + z * z) < seedR * seedR) continue;
+
           addMoleculeToPhysics(boxMoleculeData, x, y, z);
 
           const renderer = new MoleculeRenderer(boxMoleculeData);
@@ -1549,6 +1660,12 @@ async function loadMode2(moleculeName: string, count: number): Promise<void> {
           placed++;
         }
       }
+    }
+
+    // Drop the ice seed into the carved-out central region.
+    if (wantSeed) {
+      const nSeed = addIceSeed(0, 0, 0);
+      console.log(`Ice seed: ${nSeed} waters placed; ${placed} liquid around it`);
     }
 
     // Initialize velocities and start simulation

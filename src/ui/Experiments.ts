@@ -16,6 +16,10 @@ export interface Experiment {
    *  Omit to keep whatever the user last selected. One of the keys in
    *  WATER_MODELS (src/utils/waterModels.ts). */
   waterModel?: string;
+  /** If true and the experiment is mode-2 water, place a pre-built ice Ih
+   *  seed crystal at the center of the water drop. The liquid grid carves
+   *  out a sphere around the seed to avoid overlaps. */
+  iceSeed?: boolean;
   prompt: string;
 }
 
@@ -100,7 +104,8 @@ export const EXPERIMENTS: Experiment[] = [
     moleculeCount: 216,  // 6³ - enough for a proper Ih lattice to form
     barostat: false,
     waterModel: 'tip4p-ice',
-    prompt: 'This demo uses the <b>TIP4P/Ice</b> water model, which melts near 270 K (close to real ice). Start at 240 K and let it run. As molecules lose <span class="glossary" title="The energy of motion. Cooling a substance takes kinetic energy away from its molecules, slowing them down until attractions dominate over motion.">kinetic energy</span>, they lock into the tetrahedral hydrogen-bonded arrangement of <span class="glossary" title="Ordinary ice. Each oxygen is tetrahedrally coordinated by four hydrogen-bonded neighbors.">ice Ih</span>. Nucleation is slow — give it tens of picoseconds, or raise the speed slider. TIP3P would never freeze here; it melts below 150 K.',
+    iceSeed: true,
+    prompt: 'This demo uses the <b>TIP4P/Ice</b> water model (melting point ~270 K) and starts with a small pre-built <span class="glossary" title="Ordinary ice. Each oxygen is tetrahedrally coordinated by four hydrogen-bonded neighbors.">ice Ih</span> seed crystal at the center, surrounded by supercooled liquid at 240 K. Homogeneous nucleation from scratch would take nanoseconds; with the seed in place, surrounding liquid locks onto the lattice within tens of picoseconds. Watch the crystal grow outward as neighboring waters stop wiggling and settle into tetrahedral coordination.',
   },
 ];
 
