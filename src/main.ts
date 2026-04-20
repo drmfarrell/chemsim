@@ -71,11 +71,18 @@ let currentWaterModelId: string = DEFAULT_WATER_MODEL_ID;
 // or model so subsequent Mode-2 loads don't unexpectedly seed.
 let activeIceSeedExperiment: boolean = false;
 
-// Molecule indices of frozen seed waters currently carrying the ice-blue
-// tint. When unfreeze_near_ions flips one of these back to liquid we
-// clear its renderer tint too and drop the index here. Reset each time
-// a new Mode-2 box is loaded.
+// Molecule indices of frozen waters (seed + auto-promoted) currently
+// carrying the ice-blue tint. Transitions in is_frozen are synced to
+// setFrozenTint each animation frame. Reset on every new Mode-2 load.
 const seedTinted: Set<number> = new Set();
+
+// Running accumulator for auto-freeze throttling: we call
+// auto_freeze_near_frozen every ~2 sim-ps of elapsed time, not every
+// frame, so the crystal growth looks the same regardless of speed
+// multiplier and doesn't flash through all waters in one frame.
+let autoFreezePsAccum = 0;
+const AUTO_FREEZE_INTERVAL_PS = 2.0;
+const AUTO_FREEZE_MAX_PER_CALL = 3;
 let boxGroup: THREE.Group | null = null;
 let boxHelper: THREE.LineSegments | null = null;
 // Box side length (in Angstroms) that the boxHelper geometry was built for;
@@ -1079,17 +1086,35 @@ function updateMode2(_dt: number): void {
     physics.step_n(stepsPerFrame);
     effectiveSpeedMultiplier = simSpeedMultiplier;
 
-    // Local melting: whenever an ion approaches a frozen seed water,
-    // flip that water's is_frozen off so it can be dissolved away.
-    // 4.5 Å catches the first hydration shell (Na-O ≈ 2.4, Cl-H ≈ 2.3,
-    // plus a buffer) without prematurely melting waters across the box.
+    // Local melting: ions approaching the seed unfreeze it locally.
     const thawed = physics.unfreeze_near_ions(4.5);
-    if (thawed > 0) {
-      // Sync tints for any seed water that just transitioned. Only the
-      // ones that were previously tinted need updating.
+
+    // Crystal growth: liquid waters H-bonded to the crystal get promoted
+    // to frozen on a sim-time schedule. Keeps growth pace consistent
+    // across speed multipliers. The engine caps promotions per call so
+    // we don't flash through waters in a single frame.
+    const dtFs = parseFloat(
+      (document.getElementById('timestep-slider') as HTMLInputElement).value,
+    );
+    const elapsedPs = (stepsPerFrame * dtFs) / 1000;
+    autoFreezePsAccum += elapsedPs;
+    let promoted = 0;
+    if (seedTinted.size > 0 && autoFreezePsAccum >= AUTO_FREEZE_INTERVAL_PS) {
+      promoted = physics.auto_freeze_near_frozen(AUTO_FREEZE_MAX_PER_CALL);
+      autoFreezePsAccum = 0;
+    }
+
+    // Sync tints for any frozen-state transitions from either direction
+    // (melting or growth). Only touch molecules whose flag disagrees
+    // with the cached set.
+    if (thawed > 0 || promoted > 0) {
       for (let i = 0; i < boxMolecules.length; i++) {
         const nowFrozen = physics.is_molecule_frozen(i);
-        if (!nowFrozen && seedTinted.has(i)) {
+        const wasTinted = seedTinted.has(i);
+        if (nowFrozen && !wasTinted) {
+          boxMolecules[i].setFrozenTint(true);
+          seedTinted.add(i);
+        } else if (!nowFrozen && wasTinted) {
           boxMolecules[i].setFrozenTint(false);
           seedTinted.delete(i);
         }
@@ -1721,6 +1746,7 @@ function clearMode2(): void {
   }
   boxMolecules = [];
   seedTinted.clear();
+  autoFreezePsAccum = 0;
 
   if (boxHelper) {
     sceneManager.scene.remove(boxHelper);

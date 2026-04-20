@@ -223,6 +223,106 @@ impl SimulationSystem {
         self.molecules.get(idx).map(|m| m.is_frozen).unwrap_or(false)
     }
 
+    /// Promote liquid water molecules that have settled into the
+    /// crystal's H-bond network to frozen status — makes the ice front
+    /// visibly advance into the surrounding liquid. Criteria per water:
+    /// (1) O within 3.5 Å of any frozen O, (2) at least one H-bond to a
+    /// frozen neighbor (this water's H within 2.2 Å of a frozen O, or
+    /// its O within 2.2 Å of a frozen H). Candidates are ranked by
+    /// angular speed and the quietest `max_per_call` are promoted.
+    ///
+    /// This is a pedagogical aid rather than rigorous physics. Real
+    /// liquid-to-solid transitions are continuous; snapping individual
+    /// molecules to frozen lets the student *see* the growth front
+    /// without waiting nanoseconds for the angular-velocity readout to
+    /// descend.
+    ///
+    /// Returns the number of molecules newly frozen this call.
+    pub fn auto_freeze_near_frozen(&mut self, max_per_call: u32) -> u32 {
+        // Collect frozen atom positions by element.
+        let mut frozen_o: Vec<(f64, f64, f64)> = Vec::new();
+        let mut frozen_h: Vec<(f64, f64, f64)> = Vec::new();
+        for mol in &self.molecules {
+            if !mol.is_frozen { continue; }
+            for a in &mol.atoms {
+                if a.element == "O" {
+                    frozen_o.push((a.x, a.y, a.z));
+                } else if a.element == "H" {
+                    frozen_h.push((a.x, a.y, a.z));
+                }
+            }
+        }
+        if frozen_o.is_empty() { return 0; }
+
+        const OO_CUTOFF2: f64 = 3.5 * 3.5;
+        const HB_CUTOFF2: f64 = 2.2 * 2.2;
+
+        // Collect (idx, |ω|²) tuples for candidates.
+        let mut candidates: Vec<(usize, f64)> = Vec::new();
+        for (i, mol) in self.molecules.iter().enumerate() {
+            if mol.is_frozen { continue; }
+            if mol.atoms.len() != 3 { continue; }  // water only (3 atoms)
+
+            let o = match mol.atoms.iter().find(|a| a.element == "O") {
+                Some(a) => a,
+                None => continue,
+            };
+
+            // 1. Proximity: water's O near some frozen O.
+            let mut near = false;
+            for &(fx, fy, fz) in &frozen_o {
+                let dx = o.x - fx; let dy = o.y - fy; let dz = o.z - fz;
+                if dx * dx + dy * dy + dz * dz < OO_CUTOFF2 {
+                    near = true;
+                    break;
+                }
+            }
+            if !near { continue; }
+
+            // 2. H-bond: this water's H within 2.2 Å of a frozen O ...
+            let mut h_bonded = false;
+            for h in mol.atoms.iter().filter(|a| a.element == "H") {
+                for &(fx, fy, fz) in &frozen_o {
+                    let dx = h.x - fx; let dy = h.y - fy; let dz = h.z - fz;
+                    if dx * dx + dy * dy + dz * dz < HB_CUTOFF2 {
+                        h_bonded = true;
+                        break;
+                    }
+                }
+                if h_bonded { break; }
+            }
+            // ... or a frozen H within 2.2 Å of this water's O.
+            if !h_bonded {
+                for &(fx, fy, fz) in &frozen_h {
+                    let dx = o.x - fx; let dy = o.y - fy; let dz = o.z - fz;
+                    if dx * dx + dy * dy + dz * dz < HB_CUTOFF2 {
+                        h_bonded = true;
+                        break;
+                    }
+                }
+            }
+            if !h_bonded { continue; }
+
+            let (wx, wy, wz) = mol.omega_body;
+            candidates.push((i, wx * wx + wy * wy + wz * wz));
+        }
+
+        // Quietest first — these are the waters most "settled into" the
+        // crystal's network.
+        candidates.sort_by(|a, b| a.1.partial_cmp(&b.1)
+            .unwrap_or(std::cmp::Ordering::Equal));
+
+        let n = (candidates.len() as u32).min(max_per_call);
+        for &(idx, _) in candidates.iter().take(n as usize) {
+            let mol = &mut self.molecules[idx];
+            mol.is_frozen = true;
+            mol.vx = 0.0; mol.vy = 0.0; mol.vz = 0.0;
+            mol.omega_body = (0.0, 0.0, 0.0);
+        }
+        self.forces_valid = false;
+        n
+    }
+
     /// Scan for ions (single-atom molecules with |charge| > 0.5) and
     /// unfreeze any frozen water whose atoms sit within `threshold`
     /// Angstroms of an ion. This simulates local melting at the
