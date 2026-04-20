@@ -15,8 +15,8 @@ import {
 } from './utils/waterModels';
 import {
   generateIceIhSeed,
-  iceSeedRadius,
-  DEFAULT_SEED_SIZE,
+  seedDimsForCount,
+  minDistToSeedOxygen,
 } from './utils/iceIh';
 import init, {
   SimulationSystem,
@@ -1417,74 +1417,57 @@ function applyActiveWaterModel(data: MoleculeData): MoleculeData {
   return { ...data, atoms, virtual_sites };
 }
 
-/** Place an ice Ih seed crystal at (cx, cy, cz). Each seed water is added to
- *  both the physics engine and the scene. `overlapMargin` is the radius
- *  within which caller-placed waters should have been skipped to avoid
- *  overlaps; the caller is responsible for that carve-out.
+/** Place an ice Ih seed crystal at (cx, cy, cz). Each seed water is added
+ *  to both the physics engine and the scene, then frozen so it acts as a
+ *  stable substrate. Pair forces still flow normally so liquid neighbors
+ *  interact with the seed.
  *
- *  Returns the number of waters placed. Uses the active water model so the
- *  seed's charges and LJ match whatever the user has selected — a TIP3P
- *  seed at 240 K melts immediately (model's Tm ~150 K), so this really
- *  only does what you want with TIP4P/Ice. */
-function addIceSeed(cx: number, cy: number, cz: number): number {
+ *  `dims` controls the supercell (defaults to an N-appropriate size for
+ *  the current box). Returns the number of waters placed plus the seed's
+ *  oxygen world positions so the caller can skip overlapping liquid
+ *  grid sites. */
+function addIceSeed(
+  cx: number,
+  cy: number,
+  cz: number,
+  dims?: { nA: number; nB: number; nC: number },
+): { placed: number; oxygens: [number, number, number][] } {
   if (!boxMoleculeData || boxMoleculeData.name.toLowerCase() !== 'water') {
-    return 0;
+    return { placed: 0, oxygens: [] };
   }
   const cloudOn = document.getElementById('toggle-cloud')?.classList.contains('active') ?? true;
-  const { nA, nB, nC } = DEFAULT_SEED_SIZE;
-  const seed = generateIceIhSeed(cx, cy, cz, nA, nB, nC);
+  const d = dims ?? seedDimsForCount(boxMolecules.length || 125);
+  const { waters, oxygens } = generateIceIhSeed(cx, cy, cz, d.nA, d.nB, d.nC);
 
-  // Canonical water atoms (O, H, H) carry charge/LJ from the active model.
-  // We build a per-seed-water MoleculeData clone by replacing each atom's
-  // position with the corresponding seed position in the water's body
-  // frame (atoms.xyz relative to its own COM). Physics + renderer then
-  // agree on the same rigid-body geometry.
-  const [canonO, canonH1, canonH2] = boxMoleculeData.atoms;
-
+  // Every seed water uses the canonical water MoleculeData unchanged;
+  // only the COM and orientation quaternion differ. This keeps the rigid-
+  // body frame == canonical principal-axis frame, so init_rigid_body
+  // computes the right inertia tensor (no off-diagonal terms).
   let placed = 0;
-  for (const w of seed) {
-    const [O, H1, H2] = w.atoms;
-    // Mass-weighted COM (O = 15.999, H = 1.008) — units cancel in ratio.
-    const mO = 15.999, mH = 1.008;
-    const mTotal = mO + 2 * mH;
-    const comX = (mO * O[0] + mH * H1[0] + mH * H2[0]) / mTotal;
-    const comY = (mO * O[1] + mH * H1[1] + mH * H2[1]) / mTotal;
-    const comZ = (mO * O[2] + mH * H1[2] + mH * H2[2]) / mTotal;
-
-    // Body-frame positions (relative to this seed water's COM).
-    const seedData: MoleculeData = {
-      ...boxMoleculeData,
-      atoms: [
-        { ...canonO,  x: O[0]  - comX, y: O[1]  - comY, z: O[2]  - comZ },
-        { ...canonH1, x: H1[0] - comX, y: H1[1] - comY, z: H1[2] - comZ },
-        { ...canonH2, x: H2[0] - comX, y: H2[1] - comY, z: H2[2] - comZ },
-      ],
-    };
-
-    // Physics: atoms end up at world positions (cx_in_call + body_atoms).
-    addMoleculeToPhysics(seedData, comX, comY, comZ);
-    // Freeze this water so it acts as a stable substrate. The Verlet /
-    // rotation integrators and thermostat skip frozen molecules; pair
-    // forces still flow normally so liquid neighbors feel the seed.
+  for (const w of waters) {
+    addMoleculeToPhysics(boxMoleculeData, w.com[0], w.com[1], w.com[2]);
     const molIdx = physics.get_molecule_count() - 1;
+    physics.set_molecule_orientation(
+      molIdx,
+      w.quaternion[0], w.quaternion[1], w.quaternion[2], w.quaternion[3],
+    );
     physics.set_molecule_frozen(molIdx, true);
 
-    // Renderer: body-frame atoms live in the group's local frame; group is
-    // positioned at the COM. Physics will update the quaternion each
-    // frame; we start at identity since the body-frame == current world
-    // frame with the COM subtracted out.
-    const renderer = new MoleculeRenderer(seedData);
-    renderer.getGroup().position.set(
-      comX * ANGSTROM_TO_SCENE,
-      comY * ANGSTROM_TO_SCENE,
-      comZ * ANGSTROM_TO_SCENE,
+    const renderer = new MoleculeRenderer(boxMoleculeData);
+    const group = renderer.getGroup();
+    group.position.set(
+      w.com[0] * ANGSTROM_TO_SCENE,
+      w.com[1] * ANGSTROM_TO_SCENE,
+      w.com[2] * ANGSTROM_TO_SCENE,
     );
+    // Three.js Quaternion uses (x, y, z, w); physics engine uses (w, x, y, z).
+    group.quaternion.set(w.quaternion[1], w.quaternion[2], w.quaternion[3], w.quaternion[0]);
     renderer.setCloudVisible(cloudOn);
-    sceneManager.scene.add(renderer.getGroup());
+    sceneManager.scene.add(group);
     boxMolecules.push(renderer);
     placed++;
   }
-  return placed;
+  return { placed, oxygens };
 }
 
 function addMoleculeToPhysics(data: MoleculeData, cx: number, cy: number, cz: number): void {
@@ -1610,12 +1593,25 @@ async function loadMode2(moleculeName: string, count: number): Promise<void> {
     updateBoxAppearance(true);  // Solid walls appearance
 
     // If the active experiment wants an ice seed at the center (freezing
-    // demo), we carve out a sphere of that radius from the liquid grid
-    // so the placed seed doesn't overlap with liquid waters. `count` is
-    // the *total* molecule target — seed waters count against it.
+    // demo), add it BEFORE the liquid so we know where its oxygens sit;
+    // the liquid loop then skips any grid site that would overlap the
+    // seed. Seed waters count against `count`, so the total molecule
+    // budget stays what the slider says.
     const wantSeed = activeIceSeedExperiment && isWater
       && WATER_MODELS[currentWaterModelId]?.id === 'tip4p-ice';
-    const seedR = wantSeed ? iceSeedRadius(DEFAULT_SEED_SIZE.nA, DEFAULT_SEED_SIZE.nB, DEFAULT_SEED_SIZE.nC) : -1;
+    let seedOxygens: [number, number, number][] = [];
+    if (wantSeed) {
+      const dims = seedDimsForCount(count);
+      const r = addIceSeed(0, 0, 0, dims);
+      seedOxygens = r.oxygens;
+      console.log(`Ice seed: ${r.placed} waters placed (${dims.nA}x${dims.nB}x${dims.nC} supercell)`);
+    }
+    // How close can a liquid water's COM sit to a seed oxygen before we
+    // call it an overlap? One liquid water-water O-O distance (~2.7 Å)
+    // is the natural threshold — closer than that and the LJ cores push
+    // the liquid away violently. Use 2.6 so the first liquid shell can
+    // hug the seed at roughly H-bond distance.
+    const SEED_OVERLAP_CUTOFF = 2.6;
 
     // Place molecules as a "drop" in the center of the box
     // Calculate the size needed for the molecules at liquid density
@@ -1629,12 +1625,17 @@ async function loadMode2(moleculeName: string, count: number): Promise<void> {
     // Offset to center the drop in the box (drop is centered at 0,0,0)
     const dropOffset = dropSize / 2;
 
+    // When the seed is on, the slider's `count` is the total target
+    // (seed + liquid) — don't exceed it with the liquid loop.
+    const seedCount = wantSeed ? boxMolecules.length : 0;
+    const liquidTarget = Math.max(0, count - seedCount);
+
     let placed = 0;
     outer:
     for (let ix = 0; ix < perSide; ix++) {
       for (let iy = 0; iy < perSide; iy++) {
         for (let iz = 0; iz < perSide; iz++) {
-          if (placed >= count) break outer;
+          if (placed >= liquidTarget) break outer;
           const jitterX = (Math.random() - 0.5) * jitterAmount;
           const jitterY = (Math.random() - 0.5) * jitterAmount;
           const jitterZ = (Math.random() - 0.5) * jitterAmount;
@@ -1643,9 +1644,12 @@ async function loadMode2(moleculeName: string, count: number): Promise<void> {
           const y = -dropOffset + spacing * (iy + 0.5) + jitterY;
           const z = -dropOffset + spacing * (iz + 0.5) + jitterZ;
 
-          // Skip grid sites inside the seed bounding sphere — the seed
-          // will occupy the carved-out region.
-          if (wantSeed && (x * x + y * y + z * z) < seedR * seedR) continue;
+          // Skip grid sites that would overlap a seed oxygen. Per-O check
+          // (not a single sphere) so liquid hugs the seed along its long
+          // c-axis and its shorter a/b axes equally well.
+          if (wantSeed && seedOxygens.length > 0) {
+            if (minDistToSeedOxygen(x, y, z, seedOxygens) < SEED_OVERLAP_CUTOFF) continue;
+          }
 
           addMoleculeToPhysics(boxMoleculeData, x, y, z);
 
@@ -1667,10 +1671,8 @@ async function loadMode2(moleculeName: string, count: number): Promise<void> {
       }
     }
 
-    // Drop the ice seed into the carved-out central region.
     if (wantSeed) {
-      const nSeed = addIceSeed(0, 0, 0);
-      console.log(`Ice seed: ${nSeed} waters placed; ${placed} liquid around it`);
+      console.log(`Liquid: ${placed} waters around ${seedOxygens.length}-oxygen seed`);
     }
 
     // Initialize velocities and start simulation
