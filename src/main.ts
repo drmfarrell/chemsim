@@ -18,6 +18,7 @@ import {
   seedDimsForCount,
   minDistToSeedOxygen,
 } from './utils/iceIh';
+import { spacingFor } from './utils/spacing';
 import init, {
   SimulationSystem,
   initThreadPool,
@@ -1677,27 +1678,10 @@ async function addBunchOfMolecules(species: string, count: number): Promise<numb
     return best;
   };
 
-  // Grid placement at dropCenter, jittered. Spacing is species-specific
-  // because a 4 Å grid (the old default) cramming CCl4's ~7 Å-wide
-  // molecules into themselves produces explosive LJ repulsion, which
-  // then scatters them into gas-like clumps. Values below target each
-  // species' liquid density (cbrt of experimental molar volume).
-  const spacingTable: Record<string, number> = {
-    water: 3.1,
-    ammonia: 3.5,
-    hydrogen_sulfide: 3.7,
-    methane: 3.9,
-    carbon_dioxide: 4.0,
-    methanol: 4.1,
-    urea: 4.2,
-    tetrafluoromethane: 4.5,
-    ethanol: 4.6,
-    chloroform: 5.1,
-    carbon_tetrachloride: 5.5,
-    sodium_ion: 3.0,
-    chloride_ion: 3.3,
-  };
-  const spacing = spacingTable[species] ?? 4.2;
+  // Grid placement at dropCenter, jittered. Species-specific spacing
+  // (see utils/spacing.ts) so e.g. CCl4's 7-Å-wide molecules don't
+  // start overlapping their own LJ cores.
+  const spacing = spacingFor(species);
   const perSide = Math.ceil(Math.cbrt(count));
   const half_span = spacing * perSide / 2;
   const jitter = spacing * 0.1;
@@ -1797,7 +1781,9 @@ async function loadMode2(moleculeName: string, count: number): Promise<void> {
       }
       moleculeVolume = count / density;
     } else {
-      const targetSpacing = 4.5;
+      // Species-specific liquid spacing so CCl4/chloroform/etc. don't
+      // start overlapping their own LJ cores. See utils/spacing.ts.
+      const targetSpacing = spacingFor(moleculeName);
       moleculeVolume = Math.pow(targetSpacing * Math.cbrt(count), 3);
     }
 
