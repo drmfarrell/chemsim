@@ -96,10 +96,13 @@ pub struct SimulationSystem {
     // Barostat state (Berendsen-style isotropic pressure coupling).
     use_barostat: bool,
     target_pressure_bar: f64,
-    barostat_coupling: f64,   // unitless; blends dt*kappa/tau_P into one knob
+    /// Pressure-coupling time τ_P, in ps. Feeds into the Berendsen
+    /// update `mu^3 = 1 - (dt/τ_P) · κ · (P - P_target)`. Default 1 ps
+    /// — classroom-friendly response without over-damping; the Advanced
+    /// slider exposes it for tuning.
+    barostat_coupling: f64,
     last_virial: f64,          // last scalar virial (sum over pairs of r . F)
     last_pressure_bar: f64,    // cached for UI readout
-    smoothed_pressure_bar: f64, // exponentially averaged pressure for barostat feedback
 }
 
 #[wasm_bindgen]
@@ -122,14 +125,9 @@ impl SimulationSystem {
 
             use_barostat: false,
             target_pressure_bar: 1.0,
-            // Effective kappa/tau_P for barostat. The barostat responds to
-            // pressure differences to maintain target pressure. Value must
-            // account for pressure being in kJ/(mol*Å³) where 1 bar = 1/16661.
-            // With timestep of 0.002, this gives ~0.1% response per 100 bar difference.
-            barostat_coupling: 1000.0,  // Calibrated for kJ/(mol*Å³) with timestep
+            barostat_coupling: 1.0,  // τ_P in picoseconds
             last_virial: 0.0,
             last_pressure_bar: 0.0,
-            smoothed_pressure_bar: 1.0,  // Start at target to avoid initial spike
         }
     }
 
@@ -657,9 +655,10 @@ impl SimulationSystem {
     /// boundaries are enabled (it rescales the periodic cell).
     pub fn set_barostat(&mut self, enabled: bool) { self.use_barostat = enabled; }
     pub fn set_target_pressure(&mut self, p_bar: f64) { self.target_pressure_bar = p_bar; }
-    pub fn set_barostat_coupling(&mut self, k: f64) { self.barostat_coupling = k; }
+    /// Set the Berendsen coupling time τ_P (ps). Smaller = snappier
+    /// pressure regulation, larger = gentler. Classroom sweet spot ~1 ps.
+    pub fn set_barostat_coupling(&mut self, tau_p_ps: f64) { self.barostat_coupling = tau_p_ps; }
     pub fn get_pressure(&self) -> f64 { self.last_pressure_bar }
-    pub fn get_smoothed_pressure(&self) -> f64 { self.smoothed_pressure_bar }
     pub fn get_virial(&self) -> f64 { self.last_virial }
     pub fn get_box_size(&self) -> f64 { self.box_size }
 
@@ -858,75 +857,58 @@ impl SimulationSystem {
         p_kj * BAR_PER_KJ_MOL_A3
     }
 
-    /// Berendsen isotropic barostat: rescale the box and all molecule COMs
-    /// toward the target pressure. Molecule orientations, internal
-    /// coordinates, and velocities are untouched (the box is scaled around
-    /// the origin, which is the periodic cell's center in our convention).
+    /// Berendsen isotropic barostat: each step, isotropically rescale the
+    /// box and every molecule's center of mass by
     ///
-    /// TEMPORARILY DISABLED - the barostat is causing runaway expansion
-    /// Berendsen barostat: rescales box to maintain target pressure.
-    /// For small systems (<200 molecules), uses very conservative coupling
-    /// to prevent statistical noise from causing runaway expansion.
+    ///     mu^3 = 1 - (dt / tau_P) * kappa_T * (P - P_target)
+    ///     lambda = mu^3^(1/3)
+    ///
+    /// where `tau_P` is the pressure-coupling time (ps, stored in
+    /// `self.barostat_coupling`) and `kappa_T` is the isothermal
+    /// compressibility of water (4.5e-5 /bar — close enough for any
+    /// liquid we simulate; barostat is only well-defined in the
+    /// periodic NPT ensemble anyway).
+    ///
+    /// Pre-rewrite this function had a tiered-by-N ad-hoc coupling, an
+    /// asymmetric contract-vs-expand gain, a dead `barostat_coupling`
+    /// field, and a 100 Å box-size cap that silently broke the boiling
+    /// demo. See commit 56635dd + the deep-dive report in docs/ for the
+    /// pathology. Default `barostat_coupling = 1.0 ps`; ±0.1 %/step
+    /// clamp is enough to tame initial-transient overshoot without
+    /// washing out dynamics.
     fn apply_barostat(&mut self) {
-        let n = self.molecules.len();
-        if n == 0 { return; }
+        if self.molecules.is_empty() { return; }
 
-        let p_target_kj = self.target_pressure_bar / BAR_PER_KJ_MOL_A3;
+        let tau_p = self.barostat_coupling.max(0.01);  // ps
+        const KAPPA_T: f64 = 4.5e-5;                   // /bar, water compressibility
+        let delta_p = self.last_pressure_bar - self.target_pressure_bar;
 
-        // Use very conservative coupling for small systems to prevent runaway
-        // Statistical pressure fluctuations scale as 1/sqrt(N), so we need
-        // weaker coupling for smaller N.
-        let coupling = if n < 100 {
-            5.0   // Very weak coupling for small systems
-        } else if n < 200 {
-            20.0  // Moderate coupling
-        } else {
-            100.0 // Stronger coupling for larger systems
-        };
-
-        // Use instant pressure (not smoothed) for faster response in boiling demo
-        // But use asymmetric response: contract faster than expand
-        let p_current_kj = self.last_pressure_bar / BAR_PER_KJ_MOL_A3;
-        let delta_p = p_target_kj - p_current_kj;
-
-        // Asymmetric coupling: contract faster than expand to prevent runaway
-        let effective_coupling = if delta_p > 0.0 {
-            // Pressure too high - contract (box too small)
-            coupling * 2.0
-        } else {
-            // Pressure too low - expand (box too large) - be cautious
-            coupling * 0.5
-        };
-
-        // scale^3 = 1 - coupling * dt * (P_target - P)
-        let raw = 1.0 - effective_coupling * self.timestep * delta_p;
-
-        // Clamp scaling to prevent extreme changes
-        let scale3 = raw.clamp(0.99, 1.01);  // ±1% per step max
-        let mut lambda = scale3.cbrt();
-
-        // Hard cap on box size to prevent runaway expansion
-        const MAX_BOX_SIZE: f64 = 100.0;  // Å
-        let mut new_box_size = self.box_size * lambda;
-        if new_box_size > MAX_BOX_SIZE {
-            // Don't expand beyond max
-            return;
-        }
-
-        // Hard floor on box size to prevent collapse
-        const MIN_BOX_SIZE: f64 = 10.0;  // Å
-        if new_box_size < MIN_BOX_SIZE {
-            new_box_size = MIN_BOX_SIZE;
-            lambda = new_box_size / self.box_size;
-        }
-
+        let mu3 = 1.0 - (self.timestep / tau_p) * KAPPA_T * delta_p;
+        let mu3_clamped = mu3.clamp(0.999, 1.001);
+        let lambda = mu3_clamped.cbrt();
         if (lambda - 1.0).abs() < 1e-12 { return; }
 
+        // Keep the box within sane geometric bounds; MIN protects the
+        // neighbor-cell math from dividing by nothing when pressure spikes
+        // send lambda toward zero, MAX is a safety net against runaway.
+        const MIN_BOX_SIZE: f64 = 10.0;
+        const MAX_BOX_SIZE: f64 = 500.0;
+        let mut new_box_size = self.box_size * lambda;
+        let mut effective_lambda = lambda;
+        if new_box_size < MIN_BOX_SIZE {
+            new_box_size = MIN_BOX_SIZE;
+            effective_lambda = new_box_size / self.box_size;
+        } else if new_box_size > MAX_BOX_SIZE {
+            new_box_size = MAX_BOX_SIZE;
+            effective_lambda = new_box_size / self.box_size;
+        }
+
         self.box_size = new_box_size;
+        let shift = effective_lambda - 1.0;
         for mol in &mut self.molecules {
-            let dx = mol.center_x * (lambda - 1.0);
-            let dy = mol.center_y * (lambda - 1.0);
-            let dz = mol.center_z * (lambda - 1.0);
+            let dx = mol.center_x * shift;
+            let dy = mol.center_y * shift;
+            let dz = mol.center_z * shift;
             mol.translate(dx, dy, dz);
         }
     }
@@ -994,8 +976,11 @@ impl SimulationSystem {
     }
 }
 
-// Benchmark hooks (only for tests; let us compare serial vs parallel force
-// compute on the exact same state from JS).
+// Benchmark hooks — gated behind the `benchmarks` cargo feature so they
+// don't ship to students' browsers in a release build. Enable via
+// `wasm-pack build ... -- --features parallel,benchmarks` when a maintainer
+// wants to exercise `__chemsim.benchSteps` / `bench_forces_parallel` etc.
+#[cfg(feature = "benchmarks")]
 #[wasm_bindgen]
 impl SimulationSystem {
     /// Time one serial cell-list force computation, return ms.

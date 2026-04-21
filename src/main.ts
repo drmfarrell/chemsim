@@ -5,7 +5,7 @@ import { CloudDeformer } from './scene/CloudDeformer';
 import { InteractionVisualizer, InteractionData } from './scene/InteractionVisualizer';
 import { VRManager } from './scene/VRManager';
 import { loadMolecule, MoleculeData, MOLECULE_LIST } from './utils/loader';
-import { LJ_PARAMS, ANGSTROM_TO_SCENE, DEFAULT_TEMPERATURE, DEFAULT_MOLECULE_COUNT } from './utils/constants';
+import { LJ_PARAMS, ANGSTROM_TO_SCENE } from './utils/constants';
 import { Tutorial } from './ui/Tutorial';
 import { AskPanel } from './ui/AskPanel';
 import { ResultsRecorder, buildReport, captureSnapshot } from './ui/ResultsExport';

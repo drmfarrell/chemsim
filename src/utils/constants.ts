@@ -1,10 +1,7 @@
-// Physical constants
-export const COULOMB_CONSTANT = 1389.35; // kJ/mol * Angstrom / e^2 (for charges in electron units, distances in Angstroms). 1389.35 = 332.0637 kcal/mol * 4.184 kJ/kcal.
-export const BOLTZMANN_KJ = 0.00831446; // kJ/(mol*K)
-export const AVOGADRO = 6.02214076e23;
-
 // Lennard-Jones default parameters (in Angstroms and kJ/mol)
-// These are approximate, per-element defaults; real simulations use pair-specific values
+// Per-element fallback consumed at molecule-load time when a JSON doesn't
+// carry its own `epsilon` / `sigma`. See src/utils/waterModels.ts for the
+// per-water-model overrides; ion JSONs carry explicit overrides directly.
 export const LJ_PARAMS: Record<string, { epsilon: number; sigma: number }> = {
   H:  { epsilon: 0.01, sigma: 2.50 },
   C:  { epsilon: 0.4577, sigma: 3.40 },
@@ -38,18 +35,6 @@ export const VDW_RADII: Record<string, number> = {
   Na: 2.27, // Neutral sodium (use IONIC_RADII for Na+)
 };
 
-// Covalent radii (Angstroms) for ball-and-stick rendering
-export const COVALENT_RADII: Record<string, number> = {
-  H:  0.31,
-  C:  0.76,
-  N:  0.71,
-  O:  0.66,
-  F:  0.57,
-  S:  1.05,
-  Cl: 1.02,
-  Na: 1.54, // Metallic sodium (not used for ions)
-};
-
 // Element colors (CPK coloring scheme)
 export const ELEMENT_COLORS: Record<string, number> = {
   H:  0xffffff,
@@ -73,17 +58,7 @@ export const ANGSTROM_TO_SCENE = 1.0; // 1 Angstrom = 1 scene unit
 export const BALL_RADIUS_SCALE = 0.3; // Scale factor for ball-and-stick atom spheres
 export const STICK_RADIUS = 0.08;     // Radius of bond sticks
 export const CLOUD_OPACITY = 0.35;    // Default cloud transparency
-export const CLOUD_MESH_DETAIL = 3;   // Icosphere subdivision level for cloud generation
 
-// Simulation
-export const DEFAULT_TIMESTEP = 0.002;   // picoseconds
-export const DEFAULT_TEMPERATURE = 300;  // Kelvin
-export const MAX_MOLECULES_DESKTOP = 200;
-export const MAX_MOLECULES_MOBILE = 50;
-export const MAX_MOLECULES_VR = 100;
-export const INTERACTION_CUTOFF = 12.0;  // Angstroms, beyond this forces are neglected
-export const DEFORMATION_SCALE = 0.5;    // Scale factor for cloud vertex displacement
-
-// Box mode defaults
-export const DEFAULT_BOX_SIZE = 30.0;    // Angstroms per side
-export const DEFAULT_MOLECULE_COUNT = 50;
+// Cloud-deformation scale factor, consumed by CloudDeformer when morphing
+// electron-cloud vertices in response to nearby charges.
+export const DEFORMATION_SCALE = 0.5;

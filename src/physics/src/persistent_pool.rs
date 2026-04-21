@@ -194,7 +194,9 @@ pub fn persistent_pool_ready() -> bool {
 /// Ping the pool with a trivial no-op dispatch repeated `n_iters` times,
 /// returning total elapsed ms. This measures the lower bound on dispatch
 /// latency (cache-line bounce + spin-wait turnaround) so we can compare to
-/// rayon's ~1–2 ms per `par_iter` overhead.
+/// rayon's ~1–2 ms per `par_iter` overhead. Cheap enough that we leave it
+/// in production builds — main.ts's `__chemsim.benchPoolDispatch` hook
+/// calls it for live diagnostics.
 #[wasm_bindgen]
 pub fn bench_pool_dispatch(n_iters: u32) -> f64 {
     POOL.with(|slot| {

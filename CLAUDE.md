@@ -44,11 +44,19 @@ See `docs/PERFORMANCE.md` for the full story.
 ```
 src/
   main.ts                  Main app entry, render loop, UI wiring
+                           TODO (tech debt): at 2000+ lines with ~30
+                           module-level `let`s this is the biggest
+                           maintenance risk in the codebase. Split
+                           into state/SimState.ts (centralized state
+                           machine) + ui/SimControls.ts + ui/Mode2Loader.ts
+                           before the next round of major features.
   scene/                   Three.js scene, molecule rendering, VR
   physics/                 Rust crate compiled to wasm
     src/
       lib.rs               Atom/Molecule structs, Atom helpers
-      system.rs            SimulationSystem (step, force dispatch)
+      system.rs            SimulationSystem (step, force dispatch,
+                           Berendsen barostat, bench_* gated behind
+                           `benchmarks` cargo feature)
       coulomb.rs           Coulomb kernels (incl. SIMD)
       lennard_jones.rs     LJ kernels, fused Coulomb+LJ kernel
       integrator.rs        Velocity Verlet translation
@@ -57,6 +65,14 @@ src/
       deformation.rs       Electron-cloud vertex deformation (Mode 1)
       persistent_pool.rs   Spin-wait worker pool (NOT rayon par_iter!)
   data/molecules/*.json    Molecule definitions + cloud meshes
+                           (regenerated via scripts/generate_molecule_data.py)
+  ui/AskPanel.ts           Opt-in (`?ask=1`) LLM tutor — Anthropic or
+                           OpenAI-compatible. See docs/ASK_PANEL.md.
+  ui/ResultsExport.ts      Save Results → CSV + snapshot + data-
+                           dictionary HTML report.
+  utils/iceIh.ts           Ice Ih seed-crystal generator.
+  utils/waterModels.ts     TIP3P / TIP4P/2005 / TIP4P/Ice.
+  utils/spacing.ts         Per-species liquid-density grid spacing.
   ui/                      Experiments, tutorial, glossary
   utils/                   Constants, molecule loader
   wasm-pkg/                wasm-pack output (gitignored)

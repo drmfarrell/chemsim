@@ -31,13 +31,22 @@ OUTPUT_DIR = "/home/science2246/chemsim/src/data/molecules"
 
 MOLECULES = [
     {
+        # Water is the baseline — TIP4P/2005 geometry + charges + M-site.
+        # src/utils/waterModels.ts overrides per-simulation with whichever
+        # model the experiment picked (TIP3P / TIP4P/2005 / TIP4P/Ice);
+        # this JSON is what a fresh sim sees if no override is applied.
+        # ε and σ on O are here explicitly so the value doesn't silently
+        # fall back to a kcal-vs-kJ unit bug (see commit a166a51).
         "filename": "water.json",
         "name": "Water",
         "formula": "H2O",
         "atoms": [
-            {"element": "O", "x": 0.0, "y": 0.0, "z": 0.1173, "charge": -0.834, "vdw_radius": VDW["O"]},
-            {"element": "H", "x": 0.7572, "y": 0.0, "z": -0.4692, "charge": 0.417, "vdw_radius": VDW["H"]},
-            {"element": "H", "x": -0.7572, "y": 0.0, "z": -0.4692, "charge": 0.417, "vdw_radius": VDW["H"]},
+            {"element": "O", "x": 0.0, "y": 0.0, "z": 0.1173, "charge": 0.0, "vdw_radius": VDW["O"], "epsilon": 0.7749, "sigma": 3.1589},
+            {"element": "H", "x": 0.7572, "y": 0.0, "z": -0.4692, "charge": 0.5564, "vdw_radius": VDW["H"]},
+            {"element": "H", "x": -0.7572, "y": 0.0, "z": -0.4692, "charge": 0.5564, "vdw_radius": VDW["H"]},
+        ],
+        "virtual_sites": [
+            {"charge": -1.1128, "ref_atoms": [0, 1, 2], "site_type": "tip4p"},
         ],
         "bonds": [
             {"from": 0, "to": 1, "order": 1},
@@ -528,26 +537,31 @@ def main():
         cloud_mesh = generate_cloud_mesh(atoms_data, n_lat=24, n_lon=48)
 
         # Build output structure (matching required schema exactly)
+        # Pass per-atom epsilon / sigma overrides through (water O carries
+        # TIP4P/2005's LJ; most other atoms rely on element defaults from
+        # src/utils/constants.ts's LJ_PARAMS fallback).
+        def atom_out(a):
+            out = {
+                "element": a["element"],
+                "x": a["x"], "y": a["y"], "z": a["z"],
+                "charge": a["charge"], "vdw_radius": a["vdw_radius"],
+            }
+            if "epsilon" in a: out["epsilon"] = a["epsilon"]
+            if "sigma" in a: out["sigma"] = a["sigma"]
+            return out
+
         output = {
             "name": mol["name"],
             "formula": mol["formula"],
-            "atoms": [
-                {
-                    "element": a["element"],
-                    "x": a["x"],
-                    "y": a["y"],
-                    "z": a["z"],
-                    "charge": a["charge"],
-                    "vdw_radius": a["vdw_radius"],
-                }
-                for a in atoms_data
-            ],
+            "atoms": [atom_out(a) for a in atoms_data],
             "bonds": mol["bonds"],
             "cloud_mesh": cloud_mesh,
             "polarizability": mol["polarizability"],
             "dipole_moment": mol["dipole_moment"],
             "molecular_weight": mol["molecular_weight"],
         }
+        if "virtual_sites" in mol:
+            output["virtual_sites"] = mol["virtual_sites"]
 
         filepath = os.path.join(OUTPUT_DIR, mol["filename"])
         with open(filepath, "w") as f:

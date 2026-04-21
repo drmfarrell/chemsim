@@ -18,6 +18,10 @@ js-sys = "0.3"
 [features]
 default = []
 parallel = ["rayon", "wasm-bindgen-rayon"]
+# Enable the `bench_*` timing exports so maintainers can call them from
+# the browser console. Off in production so students' browsers don't
+# ship code they'd never run.
+benchmarks = []
 
 [profile.release]
 opt-level = 3
