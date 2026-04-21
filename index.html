@@ -506,8 +506,12 @@
            full-screen. -->
       <button id="toggle-main-panel" title="Hide/show the control panel">◀</button>
 
-      <!-- Ask: chemistry tutor Q&A, bottom-right floating panel. -->
-      <button id="ask-btn" title="Ask a chemistry tutor about what you're seeing in the sim.">💬 Ask</button>
+      <!-- Ask: chemistry tutor Q&A, bottom-right floating panel.
+           Hidden by default — enable with ?ask=1 in the URL or by setting
+           VITE_ENABLE_ASK=1 in the environment before running vite. See
+           docs/ASK_PANEL.md for setup. main.ts toggles `display:none`
+           based on those flags. -->
+      <button id="ask-btn" style="display:none;" title="Ask a chemistry tutor about what you're seeing in the sim.">💬 Ask</button>
       <div id="ask-panel" style="display:none;">
         <div style="display:flex; justify-content:space-between; align-items:center;">
           <h3 style="margin:0; font-size:15px;">Ask a Chemistry Tutor</h3>

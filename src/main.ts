@@ -282,31 +282,40 @@ async function main() {
   // Set up mouse/touch interaction
   setupInteraction();
 
-  // Wire up the Ask panel — sim-state snapshot + LLM chat. Pulls current
-  // mode / species / T / experiment etc. each time the user asks.
-  new AskPanel(() => {
-    const dtFs = parseFloat(
-      (document.getElementById('timestep-slider') as HTMLInputElement | null)?.value ?? '3',
-    );
-    const tempSlider = document.getElementById('temp-slider') as HTMLInputElement | null;
-    const exp = lastExperimentId ? EXPERIMENTS.find(e => e.id === lastExperimentId) : null;
-    const stepCount = Number(physics?.get_step_count?.() ?? 0);
-    return {
-      mode: currentMode,
-      primarySpecies: boxMoleculeData?.name ?? moleculeAData?.name,
-      count: currentMode === 'mode2' ? boxMolecules.length : 2,
-      temperatureK: tempSlider ? parseFloat(tempSlider.value) : undefined,
-      waterModel: currentWaterModelId,
-      experimentId: lastExperimentId,
-      experimentTitle: exp?.title ?? null,
-      iceSeedActive: seedTinted.size > 0,
-      frozenCount: seedTinted.size,
-      boxSizeA: physics?.get_box_size?.(),
-      timePs: (stepCount * dtFs) / 1000,
-      timestepFs: dtFs,
-      stepCount,
-    };
-  }).init();
+  // Ask panel is opt-in: shelved behind either a URL query flag
+  // (?ask=1) or a Vite build-time env var (VITE_ENABLE_ASK=1). If
+  // neither is set, the 💬 Ask button stays hidden and no AskPanel
+  // is instantiated — zero localStorage reads, zero fetch capability.
+  const askEnabled =
+    new URLSearchParams(location.search).get('ask') === '1'
+    || (import.meta as any).env?.VITE_ENABLE_ASK === '1';
+  if (askEnabled) {
+    const askBtn = document.getElementById('ask-btn');
+    if (askBtn) askBtn.style.display = '';
+    new AskPanel(() => {
+      const dtFs = parseFloat(
+        (document.getElementById('timestep-slider') as HTMLInputElement | null)?.value ?? '3',
+      );
+      const tempSlider = document.getElementById('temp-slider') as HTMLInputElement | null;
+      const exp = lastExperimentId ? EXPERIMENTS.find(e => e.id === lastExperimentId) : null;
+      const stepCount = Number(physics?.get_step_count?.() ?? 0);
+      return {
+        mode: currentMode,
+        primarySpecies: boxMoleculeData?.name ?? moleculeAData?.name,
+        count: currentMode === 'mode2' ? boxMolecules.length : 2,
+        temperatureK: tempSlider ? parseFloat(tempSlider.value) : undefined,
+        waterModel: currentWaterModelId,
+        experimentId: lastExperimentId,
+        experimentTitle: exp?.title ?? null,
+        iceSeedActive: seedTinted.size > 0,
+        frozenCount: seedTinted.size,
+        boxSizeA: physics?.get_box_size?.(),
+        timePs: (stepCount * dtFs) / 1000,
+        timestepFs: dtFs,
+        stepCount,
+      };
+    }).init();
+  }
 
   // Load initial molecules
   await loadMode1Pair('water', 'water');
@@ -934,8 +943,18 @@ function setupUI(): void {
     if (prompt) prompt.style.display = 'none';
   });
 
-  // Keyboard shortcuts
+  // Keyboard shortcuts. Skip entirely when the user is typing into a
+  // form field (textarea, text input, content-editable) — otherwise
+  // letters like 'c' and 'f' that the sim binds to cloud/forces
+  // toggles fire while the student types a question or API key.
   document.addEventListener('keydown', (e) => {
+    const t = e.target as HTMLElement | null;
+    if (t) {
+      const tag = t.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || t.isContentEditable) {
+        return;
+      }
+    }
     if (e.key === 'c' || e.key === 'C') {
       // Toggle cloud
       document.getElementById('toggle-cloud')!.click();
