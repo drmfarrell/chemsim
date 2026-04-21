@@ -30,10 +30,14 @@ export class SceneManager {
     this.camera = new THREE.PerspectiveCamera(60, aspect, 0.1, 1000);
     this.camera.position.set(0, 0, 15);
 
-    // Renderer
+    // Renderer. `preserveDrawingBuffer: true` so the Save Results button
+    // can call `canvas.toBlob()` without getting an empty frame (WebGL
+    // clears its drawing buffer after each swap otherwise). Small
+    // performance cost but not measurable here.
     this.renderer = new THREE.WebGLRenderer({
       antialias: true,
       alpha: true,
+      preserveDrawingBuffer: true,
     });
     this.renderer.setSize(this.container.clientWidth, this.container.clientHeight);
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));

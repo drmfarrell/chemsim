@@ -8,6 +8,7 @@ import { loadMolecule, MoleculeData, MOLECULE_LIST } from './utils/loader';
 import { LJ_PARAMS, ANGSTROM_TO_SCENE, DEFAULT_TEMPERATURE, DEFAULT_MOLECULE_COUNT } from './utils/constants';
 import { Tutorial } from './ui/Tutorial';
 import { AskPanel } from './ui/AskPanel';
+import { ResultsRecorder, buildReport, captureSnapshot } from './ui/ResultsExport';
 import { EXPERIMENTS, Experiment } from './ui/Experiments';
 import {
   WATER_MODELS,
@@ -92,6 +93,12 @@ let lastExperimentId: string | null = null;
 // carrying the ice-blue tint. Transitions in is_frozen are synced to
 // setFrozenTint each animation frame. Reset on every new Mode-2 load.
 const seedTinted: Set<number> = new Set();
+
+// Time-series recorder for the Save Results button. Pulls a snapshot of
+// physics state each animation frame; internal throttle limits actual
+// storage to ~0.5 ps sim-time intervals. Reset on every Mode-2 load so
+// one experiment's data doesn't bleed into the next session's CSV.
+const resultsRecorder = new ResultsRecorder();
 
 // Running accumulator for auto-freeze throttling: we call
 // auto_freeze_near_frozen every ~2 sim-ps of elapsed time, not every
@@ -522,6 +529,45 @@ function setupUI(): void {
   // Mode 2: Play/Pause — all UI + pool state change lives in setSimRunning.
   document.getElementById('toggle-sim-play')!.addEventListener('click', () => {
     setSimRunning(!isSimulationRunning);
+  });
+
+  // Mode 2: Save Results — capture a snapshot + build an HTML report
+  // containing the CSV data, data dictionary, and analysis suggestions,
+  // then open it in a new tab. The student uses the browser's own
+  // Print → Save as PDF from there. No runtime libraries needed; the
+  // report is a self-contained .html with an embedded PNG and a CSV
+  // data URI.
+  document.getElementById('save-results-btn')!.addEventListener('click', async () => {
+    if (currentMode !== 'mode2' || !boxMoleculeData) {
+      alert('Please switch to Mode 2 and run a simulation first.');
+      return;
+    }
+    if (resultsRecorder.count < 2) {
+      alert('Not enough data yet — let the sim run for at least a few picoseconds before saving results.');
+      return;
+    }
+    try {
+      const canvas = sceneManager.getRenderer().domElement;
+      const snapshot = await captureSnapshot(
+        () => sceneManager.getRenderer().render(sceneManager.scene, sceneManager.getCamera()),
+        canvas,
+      );
+      const exp = lastExperimentId ? EXPERIMENTS.find(e => e.id === lastExperimentId) : null;
+      const reportBlob = await buildReport(resultsRecorder, snapshot, {
+        primarySpecies: boxMoleculeData.name,
+        waterModel: boxMoleculeData.name.toLowerCase() === 'water' ? currentWaterModelId : undefined,
+        experimentId: lastExperimentId,
+        experimentTitle: exp?.title ?? null,
+        exportedAt: new Date(),
+      });
+      const url = URL.createObjectURL(reportBlob);
+      window.open(url, '_blank');
+      // Revoke after a delay so the new tab can load it first.
+      setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    } catch (e: any) {
+      console.error('Save Results failed:', e);
+      alert(`Save Results failed: ${e?.message ?? String(e)}`);
+    }
   });
 
   // Mode 2: Reset — rebuild the box from scratch. If an experiment is
@@ -1398,18 +1444,37 @@ function updateMode2Stats(): void {
     // Add to graph history. Ordering front: mean |ω| of the non-frozen
     // ("liquid") molecules. Drops as water molecules orient into the
     // H-bond network and stop tumbling — a freezing order parameter.
+    const dtFs = parseFloat(
+      (document.getElementById('timestep-slider') as HTMLInputElement).value,
+    );
+    const timePs = (Number(step) * dtFs) / 1000;
+    const omega = physics.get_mean_angular_speed_liquid();
     if (showGraph) {
-      const dtFs = parseFloat(
-        (document.getElementById('timestep-slider') as HTMLInputElement).value,
-      );
-      const timePs = (Number(step) * dtFs) / 1000;
-      const omega = physics.get_mean_angular_speed_liquid();
       graphHistory.push({ nnDist, omega, timePs });
       if (graphHistory.length > MAX_GRAPH_POINTS) {
         graphHistory.shift();
       }
       drawGraph();
     }
+    // Also stream into the Save Results recorder. Internal throttle
+    // caps at one sample per AUTO_SAMPLE_INTERVAL_PS so this is cheap.
+    resultsRecorder.maybeRecord({
+      step: Number(step),
+      timePs,
+      timestepFs: dtFs,
+      targetTempK: parseFloat(
+        (document.getElementById('temp-slider') as HTMLInputElement).value,
+      ),
+      observedTempK: temp,
+      keKJMol: ke,
+      peKJMol: pe,
+      nnDistA: nnDist,
+      meanOmegaRadPs: omega,
+      pressureBar: pressure,
+      boxSizeA: boxSize,
+      moleculeCount: boxMolecules.length,
+      frozenCount: seedTinted.size,
+    });
   }
 }
 
@@ -2072,6 +2137,7 @@ function clearMode2(): void {
   // Old history is meaningless once the box changes species, count,
   // or is re-seeded — wipe it so the graph restarts cleanly.
   graphHistory = [];
+  resultsRecorder.reset();
 
   if (boxHelper) {
     sceneManager.scene.remove(boxHelper);
