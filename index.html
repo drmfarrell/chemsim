@@ -433,12 +433,12 @@
 
         <div class="control-group" id="molecule-count-group" style="display:none;">
           <label>Molecule Count: <span id="molecule-count-value">64</span></label>
-          <input type="range" id="molecule-count-slider" min="0" max="8" value="1" step="1" />
+          <input type="range" autocomplete="off" id="molecule-count-slider" min="0" max="8" value="1" step="1" />
         </div>
 
         <div class="control-group" id="temp-group" style="display:none;">
           <label>Temperature: <span id="temp-value">300</span> K</label>
-          <input type="range" id="temp-slider" min="50" max="1000" value="300" step="10" />
+          <input type="range" autocomplete="off" id="temp-slider" min="50" max="1000" value="300" step="10" />
         </div>
 
         <div class="control-group">
@@ -480,11 +480,11 @@
             <button class="toggle-btn active" id="toggle-periodic" title="Solid walls contain molecules. Turn off to let molecules wrap around edges (periodic/infinite box).">Solid Walls</button>
           </div>
           <label style="margin-top: 8px;">Box Size: <span id="box-size-value">60</span> Å</label>
-          <input type="range" id="box-size-slider" min="15" max="150" step="1" value="60">
+          <input type="range" autocomplete="off" id="box-size-slider" min="15" max="150" step="1" value="60">
           <label style="margin-top: 8px;">Speed: <span id="sim-speed-value">1</span>x</label>
-          <input type="range" id="sim-speed-slider" min="1" max="50" step="1" value="1">
+          <input type="range" autocomplete="off" id="sim-speed-slider" min="1" max="50" step="1" value="1">
           <label style="margin-top: 8px;">Target Pressure: <span id="pressure-target-value">1</span> bar</label>
-          <input type="range" id="pressure-target-slider" min="0.1" max="50" step="0.1" value="1">
+          <input type="range" autocomplete="off" id="pressure-target-slider" min="0.1" max="50" step="0.1" value="1">
           <button id="save-results-btn" style="margin-top: 8px; background: rgba(80,140,255,0.25); border-color: rgba(80,140,255,0.5);" title="Open a self-contained HTML report (snapshot + data dictionary + CSV) in a new tab. Use the browser's Print → Save as PDF for a paper copy.">💾 Save Results</button>
           <button id="add-salt-btn" style="margin-top: 4px;">Add Salt Crystal</button>
           <button id="add-ice-seed-btn" style="margin-top: 4px;" title="Drop a pre-built ice Ih crystal into the center of the water. Only useful with TIP4P/Ice below 270 K.">Add Ice Seed</button>
@@ -521,11 +521,11 @@
             <button class="toggle-btn" id="preset-precise" title="Long cutoff + small timestep: slowest, highest accuracy. Good for measurements.">Precise</button>
           </div>
           <label style="margin-top: 10px;" title="Interaction cutoff distance. Shorter = fewer pairs = faster but ignores longer-range Coulomb.">Cutoff: <span id="cutoff-value">8.0</span> Å</label>
-          <input type="range" id="cutoff-slider" min="6" max="14" step="0.5" value="8">
+          <input type="range" autocomplete="off" id="cutoff-slider" min="6" max="14" step="0.5" value="8">
           <label style="margin-top: 6px;" title="Integration timestep. Bigger = faster wall-clock but less stable. Rigid-body rotation caps the safe ceiling around 4 fs.">Timestep: <span id="timestep-value">3.0</span> fs</label>
-          <input type="range" id="timestep-slider" min="1" max="4" step="0.5" value="3">
+          <input type="range" autocomplete="off" id="timestep-slider" min="1" max="4" step="0.5" value="3">
           <label style="margin-top: 6px;" title="Number of physics worker threads. Default leaves 2 cores free for the OS / UI / rendering. More threads = more force-loop parallelism up to diminishing returns.">Threads: <span id="threads-value">?</span> <span id="threads-max-label" style="color:#888; font-size:12px;"></span></label>
-          <input type="range" id="threads-slider" min="1" max="32" step="1" value="6">
+          <input type="range" autocomplete="off" id="threads-slider" min="1" max="32" step="1" value="6">
           <div style="font-size:12px; color:#888; margin-top:6px; line-height:1.4;">Water O-H bonds are already constrained by the rigid-body rotation integrator — no SHAKE pass needed. Cutoff is the biggest perf lever; timestep the second; thread count matters at N &gt; 200.</div>
         </div>
         <div class="control-group" style="margin-top: 12px;">
@@ -677,7 +677,7 @@
       <div id="slab-clip">
         <button id="slab-toggle" title="Enable depth clipping to see through dense clusters">Depth Clip</button>
         <span class="slab-label">Slab:</span>
-        <input type="range" id="slab-slider" min="1" max="80" step="0.2" value="20" disabled />
+        <input type="range" autocomplete="off" id="slab-slider" min="1" max="80" step="0.2" value="20" disabled />
         <span id="slab-value" style="min-width: 42px; text-align: right;">20 Å</span>
       </div>
 

@@ -169,6 +169,32 @@ function showToast(message: string, timeoutMs: number = 4800): void {
   setTimeout(() => { el.remove(); }, timeoutMs);
 }
 
+/** Reset the camera to look at the scene origin from the given distance
+ *  along +z. Does the full TrackballControls reset — setting target +
+ *  position is not enough on its own because the controls keep an
+ *  internal eye vector + a `target0/position0/up0` "home" pose that
+ *  `reset()` and the update loop both reference. If we leave that out
+ *  of sync, left-drag rotation orbits around the stale home rather
+ *  than the current target. Called from loadMode2 and from the V
+ *  keyboard shortcut. */
+function recenterCamera(distance: number = 30): void {
+  const cam = sceneManager.camera;
+  const ctl = sceneManager.controls as any;  // target0/position0/up0 are not on the .d.ts
+  cam.position.set(0, 0, distance);
+  ctl.target.set(0, 0, 0);
+  cam.up.set(0, 1, 0);
+  cam.lookAt(ctl.target);
+  ctl.update();
+  // Adopt the fresh pose as the new "home" so `controls.reset()` would
+  // return here, and so TrackballControls' internal bookkeeping lines
+  // up with what we just set.
+  if (ctl.target0 && ctl.position0 && ctl.up0) {
+    ctl.target0.copy(ctl.target);
+    ctl.position0.copy(cam.position);
+    ctl.up0.copy(cam.up);
+  }
+}
+
 function matchPoolToRunState(): void {
   if (desiredWorkerCount === 0) return;
   const shouldRun = isSimulationRunning && currentMode === 'mode2' && !document.hidden;
@@ -611,13 +637,22 @@ function setupUI(): void {
   // 2000% CPU for a simulation nobody can see.
   document.addEventListener('visibilitychange', matchPoolToRunState);
 
-  // Mode 2: Speed slider
+  // Mode 2: Speed slider. Firefox / Safari persist form state across
+  // reloads — the HTML attribute says value="1" but the browser may
+  // restore the thumb to wherever the student last left it. The
+  // displayed number reads "1" (from the initial span text), the
+  // module-level simSpeedMultiplier stays at 1, but the thumb sits at
+  // 50 until the student clicks. Force-sync by writing the slider's
+  // value explicitly and firing input once so everything reads the
+  // same number at startup.
   const speedSlider = document.getElementById('sim-speed-slider') as HTMLInputElement;
   const speedValue = document.getElementById('sim-speed-value') as HTMLSpanElement;
   speedSlider.addEventListener('input', () => {
     simSpeedMultiplier = parseInt(speedSlider.value);
     speedValue.textContent = speedSlider.value;
   });
+  speedSlider.value = '1';
+  speedSlider.dispatchEvent(new Event('input'));
 
   // Advanced panel: precision presets + cutoff/timestep sliders.
   // Ships with Fast defaults so students see dissolution happen in minutes
@@ -1055,6 +1090,16 @@ function setupUI(): void {
       document.getElementById('view-space-fill')!.click();
     } else if (e.key === '3') {
       document.getElementById('view-cloud-only')!.click();
+    } else if (e.key === 'v' || e.key === 'V') {
+      // Re-center the orbit on the box origin without rebuilding the sim.
+      // Fixes TrackballControls' habit of drifting its orbit center after
+      // right-drag pans — student can just press V to come back.
+      if (currentMode === 'mode2') {
+        const boxSize = physics.get_box_size();
+        recenterCamera(boxSize * ANGSTROM_TO_SCENE * 1.2);
+      } else {
+        recenterCamera(15);
+      }
     }
   });
 }
@@ -2149,9 +2194,13 @@ async function loadMode2(moleculeName: string, count: number): Promise<void> {
     physics.init_velocities();
     setSimRunning(true);
 
-    // Adjust camera to see the box
-    sceneManager.camera.position.set(0, 0, boxSize * ANGSTROM_TO_SCENE * 1.2);
-    sceneManager.controls.target.set(0, 0, 0);
+    // Adjust camera to see the box. Sets position + target AND does the
+    // full TrackballControls dance: camera.lookAt(target), update() to
+    // propagate the new eye vector, then copy into target0/position0/up0
+    // so the controls' internal "home" matches the current pose (stale
+    // home = left-drag rotations orbit the wrong center, which is
+    // exactly the "why is it spinning around the wrong point?" bug).
+    recenterCamera(boxSize * ANGSTROM_TO_SCENE * 1.2);
 
   } catch (e) {
     console.error('Failed to load mode 2:', e);
@@ -2222,7 +2271,7 @@ function switchMode(mode: 'mode1' | 'mode2'): void {
     const selA = document.getElementById('molecule-a-selector') as HTMLSelectElement;
     const selB = document.getElementById('molecule-b-selector') as HTMLSelectElement;
     loadMode1Pair(selA.value, selB.value);
-    sceneManager.camera.position.set(0, 0, 15);
+    recenterCamera(15);
   } else {
     const selA = document.getElementById('molecule-a-selector') as HTMLSelectElement;
     const countSlider = document.getElementById('molecule-count-slider') as HTMLInputElement;
