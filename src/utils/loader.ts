@@ -41,16 +41,28 @@ export interface MoleculeData {
 
 const moleculeCache = new Map<string, MoleculeData>();
 
+// Vite-processed dynamic-import map: every JSON under src/data/molecules/
+// becomes a lazy loader. In dev Vite resolves these against the source
+// filesystem; in production (what the ./launch.sh --preview build serves)
+// the JSONs are bundled as hashed static assets in dist/assets/. Either
+// way the same map lookup + await works — no raw `/src/...` fetches that
+// would 404 in a production build.
+const moleculeLoaders = import.meta.glob<MoleculeData>(
+  '/src/data/molecules/*.json',
+  { import: 'default' },
+);
+
 export async function loadMolecule(name: string): Promise<MoleculeData> {
   const cached = moleculeCache.get(name);
   if (cached) return cached;
 
-  const response = await fetch(`/src/data/molecules/${name}.json`);
-  if (!response.ok) {
-    throw new Error(`Failed to load molecule data: ${name} (${response.status})`);
+  const key = `/src/data/molecules/${name}.json`;
+  const loader = moleculeLoaders[key];
+  if (!loader) {
+    throw new Error(`Molecule not found: ${name} (expected ${key})`);
   }
 
-  const data: MoleculeData = await response.json();
+  const data = await loader();
   moleculeCache.set(name, data);
   return data;
 }
