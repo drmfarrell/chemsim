@@ -236,6 +236,23 @@
       margin-top: 6px;
     }
 
+    /* Small always-on hint, bottom-right. Sits above the Ask button when
+       Ask is enabled (?ask=1) and on its own when Ask is hidden. Low
+       contrast so it stays out of the way of the actual 3D scene. */
+    #view-hint {
+      position: absolute;
+      bottom: 54px;
+      right: 16px;
+      color: rgba(255,255,255,0.45);
+      font-size: 11px;
+      font-family: system-ui, sans-serif;
+      letter-spacing: 0.02em;
+      user-select: none;
+      pointer-events: none;
+      z-index: 9;
+    }
+    #view-hint b { color: rgba(255,255,255,0.75); font-weight: 600; }
+
     /* Transient toast notification — bottom-center, fades after a few seconds.
        Used when the sim implicitly changes state the student should understand
        (e.g. enabling Barostat auto-switches to periodic). Multiple toasts
@@ -543,6 +560,11 @@
            control panel. Collapses the whole panel so the sim can be watched
            full-screen. -->
       <button id="toggle-main-panel" title="Hide/show the control panel">◀</button>
+
+      <!-- Persistent "press V to center" hint, bottom-right. Small and
+           translucent — always-on nudge so students remember the
+           shortcut when the view drifts off-center. -->
+      <div id="view-hint">press <b>V</b> to center the view</div>
 
       <!-- Ask: chemistry tutor Q&A, bottom-right floating panel.
            Hidden by default — enable with ?ask=1 in the URL or by setting
