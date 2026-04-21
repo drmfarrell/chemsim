@@ -236,6 +236,42 @@
       margin-top: 6px;
     }
 
+    /* Transient toast notification — bottom-center, fades after a few seconds.
+       Used when the sim implicitly changes state the student should understand
+       (e.g. enabling Barostat auto-switches to periodic). Multiple toasts
+       stack vertically. */
+    #toast-container {
+      position: fixed;
+      bottom: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      flex-direction: column-reverse;
+      gap: 8px;
+      z-index: 1000;
+      pointer-events: none;
+    }
+    #toast-container > div {
+      background: rgba(20, 30, 60, 0.95);
+      color: #e8e8e8;
+      border: 1px solid rgba(80,140,255,0.4);
+      border-radius: 8px;
+      padding: 10px 16px;
+      font-size: 13px;
+      max-width: 520px;
+      box-shadow: 0 4px 24px rgba(0,0,0,0.4);
+      animation: toast-in 0.25s ease-out, toast-out 0.3s ease-in forwards;
+      animation-delay: 0s, 4.2s;
+      pointer-events: auto;
+    }
+    @keyframes toast-in {
+      from { opacity: 0; transform: translateY(20px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    @keyframes toast-out {
+      to { opacity: 0; transform: translateY(12px); }
+    }
+
     /* Main-panel hide toggle: thin chevron button hugging the panel's right edge */
     #toggle-main-panel {
       position: absolute;
@@ -371,6 +407,7 @@
 <body>
   <div id="app">
     <div id="canvas-container" role="application" aria-label="Molecular simulation 3D viewport"></div>
+    <div id="toast-container" aria-live="polite"></div>
 
     <div id="ui-overlay">
       <div id="control-panel">
@@ -437,7 +474,7 @@
             <button class="toggle-btn active" id="toggle-sim-play">Play</button>
             <button class="toggle-btn" id="sim-reset" title="Rebuild the box from scratch: reloads the current experiment (with its ice seed, mixture, etc.) if one is active, otherwise a fresh vanilla box at the current species and count.">Reset</button>
             <button class="toggle-btn" id="toggle-network">Network</button>
-            <button class="toggle-btn" id="toggle-barostat" title="When on, the box expands or contracts to maintain the target pressure. Off means the box is fixed (constant volume).">Barostat</button>
+            <button class="toggle-btn" id="toggle-barostat" title="Pressure regulator: the box expands or contracts to maintain the target pressure. Requires periodic boundaries — if walls are on, enabling this also switches to periodic.">Barostat</button>
           </div>
           <div class="toggle-row" style="margin-top: 4px;">
             <button class="toggle-btn active" id="toggle-periodic" title="Solid walls contain molecules. Turn off to let molecules wrap around edges (periodic/infinite box).">Solid Walls</button>

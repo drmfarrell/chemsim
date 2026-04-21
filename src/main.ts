@@ -156,6 +156,19 @@ let desiredWorkerCount = 0;
 /// the laptop a break, and bring them back up the moment the user hits
 /// Play again. Falls back to serial cell list while parked (compute
 /// path auto-detects pool_worker_count == 0).
+/** Flash a short toast notification near the bottom of the screen.
+ *  Used when the sim implicitly changes state that the student should
+ *  notice (e.g. enabling Barostat auto-switches to periodic). Auto-
+ *  removed after the CSS animation finishes. */
+function showToast(message: string, timeoutMs: number = 4800): void {
+  const container = document.getElementById('toast-container');
+  if (!container) return;
+  const el = document.createElement('div');
+  el.textContent = message;
+  container.appendChild(el);
+  setTimeout(() => { el.remove(); }, timeoutMs);
+}
+
 function matchPoolToRunState(): void {
   if (desiredWorkerCount === 0) return;
   const shouldRun = isSimulationRunning && currentMode === 'mode2' && !document.hidden;
@@ -768,11 +781,29 @@ function setupUI(): void {
   };
   setInterval(updateEffectiveSpeed, 500);
 
-  // Mode 2: Barostat toggle + target pressure slider
+  // Mode 2: Barostat toggle + target pressure slider. Barostat requires
+  // periodic boundaries (the NPT ensemble is only well-defined for an
+  // infinite-image box — with walls, shrinking the box can crush
+  // molecules into them). If the student enables it while Solid Walls
+  // is active, auto-switch to periodic and announce the change via
+  // toast so they understand why the "Walls" button flipped on them.
   document.getElementById('toggle-barostat')!.addEventListener('click', (e) => {
     const btn = e.target as HTMLButtonElement;
+    const turningOn = !btn.classList.contains('active');
     btn.classList.toggle('active');
     physics.set_barostat(btn.classList.contains('active'));
+
+    if (turningOn) {
+      const periodicBtn = document.getElementById('toggle-periodic') as HTMLButtonElement;
+      const wallsOn = periodicBtn.classList.contains('active');
+      if (wallsOn) {
+        periodicBtn.classList.remove('active');
+        periodicBtn.textContent = 'No Walls';
+        physics.set_periodic(true);
+        updateBoxAppearance(false);
+        showToast('Switched to periodic boundaries — the barostat regulates bulk pressure, which only has a well-defined meaning in an infinite-image box.');
+      }
+    }
   });
 
   // Mode 2: Periodic boundary toggle (Walls button)
